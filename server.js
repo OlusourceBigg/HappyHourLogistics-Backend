@@ -1,159 +1,169 @@
-require('dotenv').config();
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
-const Ride = require('./models/Ride');
+require('dotenv').config();
 
 const app = express();
-const PORT = process.env.PORT || 5000;
 
+// Middleware
 app.use(cors());
 app.use(express.json());
 
-// MongoDB connection
-mongoose
-  .connect(process.env.MONGO_URI)
-  .then(() => console.log(' Connected to MongoDB (HappyHourLogistics)'))
-  .catch((err) => console.error(' MongoDB Connection Error:', err.message));
+// MongoDB Connection
+const MONGO_URI = process.env.MONGO_URI;
+
+if (!MONGO_URI) {
+  console.error('ERROR: MONGO_URI is missing from environment variables!');
+} else {
+  mongoose
+    .connect(MONGO_URI)
+    .then(() => console.log('Connected to MongoDB (HappyHourLogistics)'))
+    .catch((err) => console.error('MongoDB connection error:', err.message));
+}
+
+// Ride Schema & Model (Self-contained, no external routes/models required)
+const rideSchema = new mongoose.Schema(
+  {
+    rideId: {
+      type: String,
+      default: () => 'HHL-' + Math.floor(100000 + Math.random() * 900000),
+      unique: true,
+    },
+    passengerName: { type: String, default: 'Ibadan Commuter' },
+    passengerPhone: { type: String, default: '+234 703 298 3440' },
+    pickupLocation: { type: String, required: true },
+    dropoffLocation: { type: String, required: true },
+    fare: { type: Number, required: true },
+    vehicleType: { type: String, default: 'motor' },
+    status: {
+      type: String,
+      enum: ['pending', 'accepted', 'completed', 'cancelled'],
+      default: 'pending',
+    },
+    driverName: { type: String, default: null },
+    driverPhone: { type: String, default: null },
+    vehiclePlate: { type: String, default: null },
+    paymentMethod: { type: String, default: 'cash' },
+  },
+  { timestamps: true }
+);
+
+const Ride = mongoose.models.Ride || mongoose.model('Ride', rideSchema);
+
+// ==========================================
+// API ROUTES
+// ==========================================
 
 // Health check endpoint
-app.get('/api/health', (req, res) => {
-  res.json({ status: 'ok', service: 'HappyHourLogistics API' });
+app.get('/', (req, res) => {
+  res.json({ message: 'HappyHour Logistics API is live and operational!' });
 });
 
-// Rider: Create ride
+// 1. Request a ride (Rider Mode)
 app.post('/api/rides/request', async (req, res) => {
   try {
-    const { vehicleType, pickupLocation, dropoffLocation, fare, passengerName, passengerPhone } = req.body;
+    const { pickupLocation, dropoffLocation, fare, vehicleType, passengerName, passengerPhone } = req.body;
 
     if (!pickupLocation || !dropoffLocation || !fare) {
-      return res.status(400).json({ error: 'Pickup, drop-off, and fare are required.' });
+      return res.status(400).json({ success: false, error: 'Pickup, dropoff, and fare are required.' });
     }
 
-    const rideId = `HHL-RD-${Math.floor(100000 + Math.random() * 900000)}`;
-
-    const newRide = await Ride.create({
-      rideId,
-      vehicleType: vehicleType || 'motor',
+    const newRide = new Ride({
       pickupLocation,
       dropoffLocation,
       fare,
-      passengerName: passengerName || 'Ibadan Rider',
-      passengerPhone: passengerPhone || '',
-      status: 'pending',
+      vehicleType: vehicleType || 'motor',
+      passengerName: passengerName || 'Ibadan Commuter',
+      passengerPhone: passengerPhone || '+234 703 298 3440',
     });
 
-    res.status(201).json({ success: true, ride: newRide });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
+    const savedRide = await newRide.save();
+    console.log(`[Ride Created] ID: ${savedRide.rideId} | Fare: ₦${savedRide.fare}`);
+
+    res.status(201).json({ success: true, ride: savedRide });
+  } catch (err) {
+    console.error('Ride request error:', err.message);
+    res.status(500).json({ success: false, error: 'Failed to create ride request.' });
   }
 });
 
-// Driver: Get pending trips
+// 2. Fetch available pending rides (Driver Mode)
 app.get('/api/rides/available', async (req, res) => {
   try {
-    const pendingRides = await Ride.find({ status: 'pending' }).sort({ createdAt: -1 }).limit(20);
-    res.json({ success: true, rides: pendingRides });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
+    const rides = await Ride.find({ status: 'pending' }).sort({ createdAt: -1 }).limit(20);
+    res.json({ success: true, rides });
+  } catch (err) {
+    console.error('Fetch rides error:', err.message);
+    res.status(500).json({ success: false, error: 'Failed to fetch available rides.' });
   }
 });
 
-// Driver: Accept trip
-app.patch('/api/rides/:id/accept', async (req, res) => {
+// 3. Driver accepts a ride
+app.patch('/api/rides/:identifier/accept', async (req, res) => {
   try {
-    const { id } = req.params;
+    const { identifier } = req.params;
     const { driverName, driverPhone, vehiclePlate } = req.body;
 
-    let ride = await Ride.findOne({ rideId: id });
-    if (!ride && /^[0-9a-fA-F]{24}$/.test(id)) {
-      ride = await Ride.findById(id);
-    }
+    const query = mongoose.Types.ObjectId.isValid(identifier)
+      ? { $or: [{ _id: identifier }, { rideId: identifier }] }
+      : { rideId: identifier };
+
+    const ride = await Ride.findOne(query);
 
     if (!ride) {
-      return res.status(404).json({
-        success: false,
-        message: 'Ride request not found',
-      });
+      return res.status(404).json({ success: false, message: 'Ride not found.' });
     }
 
     if (ride.status !== 'pending') {
-      return res.status(400).json({
-        success: false,
-        message: `Ride cannot be accepted because it is already ${ride.status}`,
-      });
+      return res.status(400).json({ success: false, message: 'This ride has already been claimed.' });
     }
 
     ride.status = 'accepted';
-    ride.assignedDriver = {
-      name: driverName || 'Captain Segun',
-      phone: driverPhone || '08098765432',
-      vehiclePlate: vehiclePlate || 'IBD-452-AA',
-    };
+    ride.driverName = driverName || 'Captain Segun';
+    ride.driverPhone = driverPhone || '+234 703 298 3440';
+    ride.vehiclePlate = vehiclePlate || 'IBD-452-AA';
 
-    const updatedRide = await ride.save();
+    await ride.save();
+    console.log(`[Ride Accepted] ID: ${ride.rideId} by ${ride.driverName}`);
 
-    return res.status(200).json({
-      success: true,
-      message: 'Ride successfully accepted by driver',
-      ride: updatedRide,
-    });
-  } catch (error) {
-    console.error('Error accepting ride:', error);
-    return res.status(500).json({
-      success: false,
-      message: 'Server error while accepting ride',
-      error: error.message,
-    });
+    res.json({ success: true, ride });
+  } catch (err) {
+    console.error('Accept ride error:', err.message);
+    res.status(500).json({ success: false, error: 'Failed to accept ride.' });
   }
 });
 
-// Driver: Complete trip
-app.patch('/api/rides/:id/complete', async (req, res) => {
+// 4. Complete a ride
+app.patch('/api/rides/:identifier/complete', async (req, res) => {
   try {
-    const { id } = req.params;
+    const { identifier } = req.params;
     const { paymentMethod } = req.body;
 
-    let ride = await Ride.findOne({ rideId: id });
-    if (!ride && /^[0-9a-fA-F]{24}$/.test(id)) {
-      ride = await Ride.findById(id);
-    }
+    const query = mongoose.Types.ObjectId.isValid(identifier)
+      ? { $or: [{ _id: identifier }, { rideId: identifier }] }
+      : { rideId: identifier };
+
+    const ride = await Ride.findOne(query);
 
     if (!ride) {
-      return res.status(404).json({
-        success: false,
-        message: 'Ride request not found',
-      });
-    }
-
-    if (ride.status !== 'accepted' && ride.status !== 'in-progress') {
-      return res.status(400).json({
-        success: false,
-        message: `Cannot complete trip with status "${ride.status}". Must be "accepted" or "in-progress".`,
-      });
+      return res.status(404).json({ success: false, message: 'Ride not found.' });
     }
 
     ride.status = 'completed';
-    ride.paymentMethod = paymentMethod || 'cash';
-    ride.completedAt = new Date();
+    if (paymentMethod) ride.paymentMethod = paymentMethod;
 
-    const updatedRide = await ride.save();
+    await ride.save();
+    console.log(`[Ride Completed] ID: ${ride.rideId}`);
 
-    return res.status(200).json({
-      success: true,
-      message: 'Trip completed successfully. Ready for fare collection.',
-      ride: updatedRide,
-    });
-  } catch (error) {
-    console.error('Error completing ride:', error);
-    return res.status(500).json({
-      success: false,
-      message: 'Server error while completing ride',
-      error: error.message,
-    });
+    res.json({ success: true, ride });
+  } catch (err) {
+    console.error('Complete ride error:', err.message);
+    res.status(500).json({ success: false, error: 'Failed to complete ride.' });
   }
 });
 
+// Port Binding for Render
+const PORT = process.env.PORT || 5000;
 app.listen(PORT, '0.0.0.0', () => {
-  console.log(` HappyHourLogistics Server running on http://0.0.0.0:${PORT}`);
+  console.log(`Server running on port ${PORT}`);
 });
