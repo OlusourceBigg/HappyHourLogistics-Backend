@@ -26,7 +26,7 @@ if (!MONGO_URI) {
 } else {
   mongoose
     .connect(MONGO_URI)
-    .then(() => console.log('Connected to MongoDB (HappyHourLogistics)'))
+    .then(() => console.log('Connected to MongoDB (happyhourlogistics)'))
     .catch((err) => console.error('MongoDB connection error:', err.message));
 }
 
@@ -117,7 +117,7 @@ app.get('/api/rides/available', async (req, res) => {
     res.json({ success: true, rides });
   } catch (err) {
     console.error('Fetch rides error:', err.message);
-    res.status(500).json({ success: false, error: err.message });
+    res.status(500).json({ success: false, error: 'Failed to fetch available rides.' });
   }
 });
 
@@ -152,7 +152,7 @@ app.patch('/api/rides/:identifier/accept', async (req, res) => {
     res.json({ success: true, ride });
   } catch (err) {
     console.error('Accept ride error:', err.message);
-    res.status(500).json({ success: false, error: err.message });
+    res.status(500).json({ success: false, error: 'Failed to accept ride.' });
   }
 });
 
@@ -181,7 +181,42 @@ app.patch('/api/rides/:identifier/complete', async (req, res) => {
     res.json({ success: true, ride });
   } catch (err) {
     console.error('Complete ride error:', err.message);
-    res.status(500).json({ success: false, error: err.message });
+    res.status(500).json({ success: false, error: 'Failed to complete ride.' });
+  }
+});
+
+// 5. Driver Live Metrics (Today's Earnings & Trips Done)
+app.get('/api/driver/metrics', async (req, res) => {
+  try {
+    const startOfToday = new Date();
+    startOfToday.setHours(0, 0, 0, 0);
+
+    const result = await Ride.aggregate([
+      {
+        $match: {
+          status: 'completed',
+          updatedAt: { $gte: startOfToday },
+        },
+      },
+      {
+        $group: {
+          _id: null,
+          todayEarnings: { $sum: '$fare' },
+          tripsDone: { $sum: 1 },
+        },
+      },
+    ]);
+
+    const metrics = result[0] || { todayEarnings: 0, tripsDone: 0 };
+
+    res.json({
+      success: true,
+      todayEarnings: metrics.todayEarnings,
+      tripsDone: metrics.tripsDone,
+    });
+  } catch (err) {
+    console.error('Driver metrics error:', err.message);
+    res.status(500).json({ success: false, error: 'Failed to calculate driver metrics.' });
   }
 });
 
