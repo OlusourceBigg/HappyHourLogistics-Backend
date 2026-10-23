@@ -210,7 +210,36 @@ app.patch('/api/rides/:identifier/complete', async (req, res) => {
   }
 });
 
-// 6. Driver Live Metrics (Today's Earnings & Trips Done)
+// 6. Cancel a ride (Rider cancellation)
+app.patch('/api/rides/:identifier/cancel', async (req, res) => {
+  try {
+    const { identifier } = req.params;
+    const query = mongoose.Types.ObjectId.isValid(identifier)
+      ? { $or: [{ _id: identifier }, { rideId: identifier }] }
+      : { rideId: identifier };
+
+    const ride = await Ride.findOne(query);
+
+    if (!ride) {
+      return res.status(404).json({ success: false, message: 'Ride not found.' });
+    }
+
+    if (ride.status === 'completed') {
+      return res.status(400).json({ success: false, message: 'Cannot cancel a completed ride.' });
+    }
+
+    ride.status = 'cancelled';
+    await ride.save();
+    console.log(`[Ride Cancelled] ID: ${ride.rideId}`);
+
+    res.json({ success: true, message: 'Ride cancelled successfully.', ride });
+  } catch (err) {
+    console.error('Cancel ride error:', err.message);
+    res.status(500).json({ success: false, error: 'Failed to cancel ride.' });
+  }
+});
+
+// 7. Driver Live Metrics (Today's Earnings & Trips Done)
 app.get('/api/driver/metrics', async (req, res) => {
   try {
     const startOfToday = new Date();
