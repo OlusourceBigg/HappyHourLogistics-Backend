@@ -11,6 +11,7 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+// Real-time console logger for all mobile requests
 app.use((req, res, next) => {
   console.log(`--> [${req.method}] ${req.url}`);
   if (req.method === 'POST' || req.method === 'PATCH') {
