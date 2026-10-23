@@ -5,11 +5,12 @@ require('dotenv').config();
 
 const app = express();
 
-// Middleware
+// ==========================================
+// MIDDLEWARE & REQUEST LOGGING
+// ==========================================
 app.use(cors());
 app.use(express.json());
 
-// Request Logger (Shows phone requests live in Render Logs)
 app.use((req, res, next) => {
   console.log(`--> [${req.method}] ${req.url}`);
   if (req.method === 'POST' || req.method === 'PATCH') {
@@ -18,7 +19,9 @@ app.use((req, res, next) => {
   next();
 });
 
-// MongoDB Connection
+// ==========================================
+// MONGODB CONNECTION
+// ==========================================
 const MONGO_URI = process.env.MONGO_URI;
 
 if (!MONGO_URI) {
@@ -30,7 +33,9 @@ if (!MONGO_URI) {
     .catch((err) => console.error('MongoDB connection error:', err.message));
 }
 
-// Ride Schema & Model
+// ==========================================
+// SCHEMA & MODEL
+// ==========================================
 const rideSchema = new mongoose.Schema(
   {
     rideId: {
@@ -63,7 +68,7 @@ const Ride = mongoose.models.Ride || mongoose.model('Ride', rideSchema);
 // API ROUTES
 // ==========================================
 
-// Health check endpoint
+// Health check
 app.get('/', (req, res) => {
   res.json({ message: 'HappyHour Logistics API is live and operational!' });
 });
@@ -85,7 +90,6 @@ app.post('/api/rides/request', async (req, res) => {
       });
     }
 
-    // Convert string like "₦1400" or "1,400" to number 1400
     const cleanedFare =
       typeof rawFare === 'number'
         ? rawFare
@@ -121,7 +125,28 @@ app.get('/api/rides/available', async (req, res) => {
   }
 });
 
-// 3. Driver accepts a ride
+// 3. Fetch single ride status (Live Rider Tracking Polling)
+app.get('/api/rides/:identifier', async (req, res) => {
+  try {
+    const { identifier } = req.params;
+    const query = mongoose.Types.ObjectId.isValid(identifier)
+      ? { $or: [{ _id: identifier }, { rideId: identifier }] }
+      : { rideId: identifier };
+
+    const ride = await Ride.findOne(query);
+
+    if (!ride) {
+      return res.status(404).json({ success: false, message: 'Ride not found.' });
+    }
+
+    res.json({ success: true, ride });
+  } catch (err) {
+    console.error('Fetch ride status error:', err.message);
+    res.status(500).json({ success: false, error: 'Failed to fetch ride status.' });
+  }
+});
+
+// 4. Driver accepts a ride
 app.patch('/api/rides/:identifier/accept', async (req, res) => {
   try {
     const { identifier } = req.params;
@@ -156,7 +181,7 @@ app.patch('/api/rides/:identifier/accept', async (req, res) => {
   }
 });
 
-// 4. Complete a ride
+// 5. Complete a ride
 app.patch('/api/rides/:identifier/complete', async (req, res) => {
   try {
     const { identifier } = req.params;
@@ -185,7 +210,7 @@ app.patch('/api/rides/:identifier/complete', async (req, res) => {
   }
 });
 
-// 5. Driver Live Metrics (Today's Earnings & Trips Done)
+// 6. Driver Live Metrics (Today's Earnings & Trips Done)
 app.get('/api/driver/metrics', async (req, res) => {
   try {
     const startOfToday = new Date();
@@ -220,7 +245,9 @@ app.get('/api/driver/metrics', async (req, res) => {
   }
 });
 
-// Port Binding for Render
+// ==========================================
+// SERVER INITIALIZATION
+// ==========================================
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`Server running on port ${PORT}`);
