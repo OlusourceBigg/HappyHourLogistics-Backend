@@ -9,6 +9,15 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+// Request Logger (Shows phone requests live in Render Logs)
+app.use((req, res, next) => {
+  console.log(`--> [${req.method}] ${req.url}`);
+  if (req.method === 'POST' || req.method === 'PATCH') {
+    console.log('Payload:', JSON.stringify(req.body));
+  }
+  next();
+});
+
 // MongoDB Connection
 const MONGO_URI = process.env.MONGO_URI;
 
@@ -21,7 +30,7 @@ if (!MONGO_URI) {
     .catch((err) => console.error('MongoDB connection error:', err.message));
 }
 
-// Ride Schema & Model (Self-contained, no external routes/models required)
+// Ride Schema & Model
 const rideSchema = new mongoose.Schema(
   {
     rideId: {
@@ -34,7 +43,7 @@ const rideSchema = new mongoose.Schema(
     pickupLocation: { type: String, required: true },
     dropoffLocation: { type: String, required: true },
     fare: { type: Number, required: true },
-    vehicleType: { type: String, default: 'motor' },
+    vehicleType: { type: String, default: 'Cab / Micra' },
     status: {
       type: String,
       enum: ['pending', 'accepted', 'completed', 'cancelled'],
@@ -59,31 +68,45 @@ app.get('/', (req, res) => {
   res.json({ message: 'HappyHour Logistics API is live and operational!' });
 });
 
-// 1. Request a ride (Rider Mode)
+// 1. Request a ride (Rider Mode - Sanitized)
 app.post('/api/rides/request', async (req, res) => {
   try {
-    const { pickupLocation, dropoffLocation, fare, vehicleType, passengerName, passengerPhone } = req.body;
+    const pickup = req.body.pickupLocation || req.body.pickup || 'Iwo Road Interchange';
+    const dropoff = req.body.dropoffLocation || req.body.dropoff || req.body.destination;
+    const rawFare = req.body.fare;
+    const vehicleType = req.body.vehicleType || 'Cab / Micra';
+    const passengerName = req.body.passengerName || 'Ibadan Commuter';
+    const passengerPhone = req.body.passengerPhone || '+234 703 298 3440';
 
-    if (!pickupLocation || !dropoffLocation || !fare) {
-      return res.status(400).json({ success: false, error: 'Pickup, dropoff, and fare are required.' });
+    if (!dropoff) {
+      return res.status(400).json({
+        success: false,
+        error: 'Please enter a Drop-off Destination on your screen.',
+      });
     }
 
+    // Convert string like "₦1400" or "1,400" to number 1400
+    const cleanedFare =
+      typeof rawFare === 'number'
+        ? rawFare
+        : Number(String(rawFare || '1400').replace(/[^0-9.]/g, '')) || 1400;
+
     const newRide = new Ride({
-      pickupLocation,
-      dropoffLocation,
-      fare,
-      vehicleType: vehicleType || 'motor',
-      passengerName: passengerName || 'Ibadan Commuter',
-      passengerPhone: passengerPhone || '+234 703 298 3440',
+      pickupLocation: String(pickup).trim(),
+      dropoffLocation: String(dropoff).trim(),
+      fare: cleanedFare,
+      vehicleType,
+      passengerName,
+      passengerPhone,
     });
 
     const savedRide = await newRide.save();
     console.log(`[Ride Created] ID: ${savedRide.rideId} | Fare: ₦${savedRide.fare}`);
 
-    res.status(201).json({ success: true, ride: savedRide });
+    return res.status(201).json({ success: true, ride: savedRide });
   } catch (err) {
     console.error('Ride request error:', err.message);
-    res.status(500).json({ success: false, error: 'Failed to create ride request.' });
+    return res.status(500).json({ success: false, error: err.message });
   }
 });
 
@@ -94,7 +117,7 @@ app.get('/api/rides/available', async (req, res) => {
     res.json({ success: true, rides });
   } catch (err) {
     console.error('Fetch rides error:', err.message);
-    res.status(500).json({ success: false, error: 'Failed to fetch available rides.' });
+    res.status(500).json({ success: false, error: err.message });
   }
 });
 
@@ -129,7 +152,7 @@ app.patch('/api/rides/:identifier/accept', async (req, res) => {
     res.json({ success: true, ride });
   } catch (err) {
     console.error('Accept ride error:', err.message);
-    res.status(500).json({ success: false, error: 'Failed to accept ride.' });
+    res.status(500).json({ success: false, error: err.message });
   }
 });
 
@@ -158,7 +181,7 @@ app.patch('/api/rides/:identifier/complete', async (req, res) => {
     res.json({ success: true, ride });
   } catch (err) {
     console.error('Complete ride error:', err.message);
-    res.status(500).json({ success: false, error: 'Failed to complete ride.' });
+    res.status(500).json({ success: false, error: err.message });
   }
 });
 
