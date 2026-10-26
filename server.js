@@ -57,7 +57,7 @@ userSchema.index({ phone: 1 });
 
 const User = mongoose.model('User', userSchema);
 
-// --- RIDE SCHEMA WITH FINANCIAL BREAKDOWN ---
+// --- RIDE SCHEMA WITH BACKWARD COMPATIBILITY & FINANCIAL SPLIT ---
 const rideSchema = new mongoose.Schema({
   rideId: { type: String, required: true, unique: true },
   passenger: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
@@ -67,10 +67,12 @@ const rideSchema = new mongoose.Schema({
   pickupLocation: { type: String, required: true },
   dropoffLocation: { type: String, required: true },
   
-  // Financial breakdown
-  totalFare: { type: Number, required: true },
+  // Both fields populated to prevent frontend formatting crashes
+  fare: { type: Number, required: true },      // Mobile app backwards compatibility
+  totalFare: { type: Number, required: true }, // Ledger & accounting field
+  
   commissionRate: { type: Number, default: 0.15 }, // 15% platform cut
-  platformFee: { type: Number, required: true },    // 15% retained by company
+  platformFee: { type: Number, required: true },    // 15% retained by HappyHour
   driverEarnings: { type: Number, required: true }, // 85% paid to driver
   
   paymentMethod: { 
@@ -167,10 +169,10 @@ app.post('/api/rides/request', async (req, res) => {
       paymentMethod 
     } = req.body;
 
-    // Accepts either 'fare' or 'totalFare' from the frontend payload
-    const tripFare = fare || totalFare;
+    // Accept either 'fare' or 'totalFare' from the incoming mobile payload
+    const rawFare = fare !== undefined ? fare : totalFare;
 
-    if (!pickupLocation || !dropoffLocation || !tripFare || !vehicleType) {
+    if (!pickupLocation || !dropoffLocation || rawFare === undefined || !vehicleType) {
       return res.status(400).json({ 
         success: false, 
         message: 'Missing required trip parameters (pickup, dropoff, fare, vehicleType).' 
@@ -178,7 +180,7 @@ app.post('/api/rides/request', async (req, res) => {
     }
 
     // Mathematical split: 15% platform commission, 85% driver earnings
-    const numericFare = Number(tripFare);
+    const numericFare = Number(rawFare);
     const commissionRate = 0.15;
     const platformFee = Math.round(numericFare * commissionRate);
     const driverEarnings = numericFare - platformFee;
@@ -192,7 +194,8 @@ app.post('/api/rides/request', async (req, res) => {
       passengerPhone: passengerPhone || '',
       pickupLocation,
       dropoffLocation,
-      totalFare: numericFare,
+      fare: numericFare,       // Populated for frontend compatibility (resolves toLocaleString crash)
+      totalFare: numericFare,  // Populated for accounting and ledger records
       commissionRate,
       platformFee,
       driverEarnings,
@@ -213,7 +216,7 @@ app.post('/api/rides/request', async (req, res) => {
 app.get('/api/rides/available', async (req, res) => {
   try {
     const availableRides = await Ride.find({ status: 'pending' })
-      .select('rideId passengerName passengerPhone pickupLocation dropoffLocation totalFare platformFee driverEarnings vehicleType paymentMethod createdAt')
+      .select('rideId passengerName passengerPhone pickupLocation dropoffLocation fare totalFare platformFee driverEarnings vehicleType paymentMethod createdAt')
       .sort({ createdAt: -1 })
       .limit(25)
       .lean();
