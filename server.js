@@ -36,7 +36,7 @@ mongoose
   });
 
 // ==========================================
-// 3. SCHEMAS, HIGH-TRAFFIC INDEXES & MODELS
+// 3. SCHEMAS, INDEXES & MODELS
 // ==========================================
 
 // --- USER SCHEMA ---
@@ -57,7 +57,7 @@ userSchema.index({ phone: 1 });
 
 const User = mongoose.model('User', userSchema);
 
-// --- RIDE SCHEMA ---
+// --- RIDE SCHEMA WITH FINANCIAL BREAKDOWN ---
 const rideSchema = new mongoose.Schema({
   rideId: { type: String, required: true, unique: true },
   passenger: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
@@ -66,7 +66,24 @@ const rideSchema = new mongoose.Schema({
   passengerPhone: { type: String, required: true },
   pickupLocation: { type: String, required: true },
   dropoffLocation: { type: String, required: true },
-  fare: { type: Number, required: true },
+  
+  // Financial breakdown
+  totalFare: { type: Number, required: true },
+  commissionRate: { type: Number, default: 0.15 }, // 15% platform cut
+  platformFee: { type: Number, required: true },    // 15% retained by company
+  driverEarnings: { type: Number, required: true }, // 85% paid to driver
+  
+  paymentMethod: { 
+    type: String, 
+    enum: ['cash', 'card', 'transfer', 'wallet'], 
+    default: 'cash' 
+  },
+  paymentStatus: { 
+    type: String, 
+    enum: ['pending', 'paid', 'settled'], 
+    default: 'pending' 
+  },
+
   vehicleType: { type: String, required: true },
   status: { 
     type: String, 
@@ -76,10 +93,10 @@ const rideSchema = new mongoose.Schema({
   createdAt: { type: Date, default: Date.now },
 });
 
-// Compound index for the high-frequency Driver Radar feed
+// Compound index for high-speed Driver Radar queries
 rideSchema.index({ status: 1, createdAt: -1 });
 
-// Single indexes for fast tracking and history lookups
+// Single indexes for tracking and trip histories
 rideSchema.index({ rideId: 1 });
 rideSchema.index({ passenger: 1, createdAt: -1 });
 rideSchema.index({ driver: 1, createdAt: -1 });
@@ -90,7 +107,7 @@ const Ride = mongoose.model('Ride', rideSchema);
 // 4. API ROUTES
 // ==========================================
 
-// Root health-check endpoint
+// Health-check
 app.get('/', (req, res) => {
   res.json({ message: 'HappyHour Logistics API is live and operational!' });
 });
@@ -135,14 +152,36 @@ app.post('/api/users/auth', async (req, res) => {
   }
 });
 
-// Passenger: Request a new ride
+// Passenger: Request a new ride with automated fee calculation
 app.post('/api/rides/request', async (req, res) => {
   try {
-    const { passengerId, passengerName, passengerPhone, pickupLocation, dropoffLocation, fare, vehicleType } = req.body;
+    const { 
+      passengerId, 
+      passengerName, 
+      passengerPhone, 
+      pickupLocation, 
+      dropoffLocation, 
+      fare, 
+      totalFare,
+      vehicleType,
+      paymentMethod 
+    } = req.body;
 
-    if (!pickupLocation || !dropoffLocation || !fare || !vehicleType) {
-      return res.status(400).json({ success: false, message: 'Missing required trip parameters.' });
+    // Accepts either 'fare' or 'totalFare' from the frontend payload
+    const tripFare = fare || totalFare;
+
+    if (!pickupLocation || !dropoffLocation || !tripFare || !vehicleType) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Missing required trip parameters (pickup, dropoff, fare, vehicleType).' 
+      });
     }
+
+    // Mathematical split: 15% platform commission, 85% driver earnings
+    const numericFare = Number(tripFare);
+    const commissionRate = 0.15;
+    const platformFee = Math.round(numericFare * commissionRate);
+    const driverEarnings = numericFare - platformFee;
 
     const rideId = `HHL-${Math.floor(100000 + Math.random() * 900000)}`;
 
@@ -153,7 +192,12 @@ app.post('/api/rides/request', async (req, res) => {
       passengerPhone: passengerPhone || '',
       pickupLocation,
       dropoffLocation,
-      fare,
+      totalFare: numericFare,
+      commissionRate,
+      platformFee,
+      driverEarnings,
+      paymentMethod: paymentMethod || 'cash',
+      paymentStatus: 'pending',
       vehicleType,
       status: 'pending',
     });
@@ -165,11 +209,11 @@ app.post('/api/rides/request', async (req, res) => {
   }
 });
 
-// Driver: High-frequency radar feed for available trips (.lean() optimized)
+// Driver: High-frequency radar feed for available trips
 app.get('/api/rides/available', async (req, res) => {
   try {
     const availableRides = await Ride.find({ status: 'pending' })
-      .select('rideId passengerName passengerPhone pickupLocation dropoffLocation fare vehicleType createdAt')
+      .select('rideId passengerName passengerPhone pickupLocation dropoffLocation totalFare platformFee driverEarnings vehicleType paymentMethod createdAt')
       .sort({ createdAt: -1 })
       .limit(25)
       .lean();
@@ -185,6 +229,10 @@ app.get('/api/rides/available', async (req, res) => {
 app.post('/api/rides/accept', async (req, res) => {
   try {
     const { rideId, driverId } = req.body;
+
+    if (!rideId) {
+      return res.status(400).json({ success: false, message: 'rideId is required.' });
+    }
 
     const ride = await Ride.findOneAndUpdate(
       { rideId, status: 'pending' },
@@ -218,10 +266,10 @@ app.get('/api/rides/:rideId', async (req, res) => {
 });
 
 // ==========================================
-// 5. SAFETY & ERROR HANDLING (PREVENTS HTML RESPONSES)
+// 5. SAFETY & ERROR HANDLING
 // ==========================================
 
-// Catch-all 404 for undefined routes
+// Catch-all 404 handler (always returns clean JSON, never HTML)
 app.use((req, res) => {
   res.status(404).json({
     success: false,
