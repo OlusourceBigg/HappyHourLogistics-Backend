@@ -8,9 +8,11 @@ app.use(cors());
 app.use(express.json());
 
 // ==========================================
-// 1. DATABASE CONNECTION
+// 1. DATABASE CONNECTION (LOWERCASE CASING)
 // ==========================================
-const MONGO_URI = process.env.MONGO_URI || 'mongodb+srv://oolusource_db_user:gKS6Twqqqlv317ni@olusourcecluster.isfjl5l.mongodb.net/happyhourlogistics?retryWrites=true&w=majority';
+const MONGO_URI =
+  process.env.MONGO_URI ||
+  'mongodb+srv://oolusource_db_user:Olusource123@olusourcecluster.isfjl5l.mongodb.net/happyhourlogistics?retryWrites=true&w=majority';
 
 mongoose
   .connect(MONGO_URI)
@@ -30,7 +32,6 @@ const userSchema = new mongoose.Schema({
     enum: ['passenger', 'driver', 'admin'],
     default: 'passenger',
   },
-  // Detailed Driver KYC & Vetting Information
   driverDetails: {
     dateOfBirth: { type: String, default: '' },
     profileImage: { type: String, default: '' },
@@ -53,7 +54,7 @@ const userSchema = new mongoose.Schema({
     verificationStatus: {
       type: String,
       enum: ['pending', 'approved', 'rejected'],
-      default: 'approved', // Default approved for direct operational testing
+      default: 'approved',
     },
   },
   isApprovedDriver: { type: Boolean, default: true },
@@ -102,7 +103,7 @@ app.get('/', (req, res) => {
   res.json({ status: 'Online', service: 'HappyHour Logistics API', region: 'Ibadan, Nigeria' });
 });
 
-// A. Fast Auth / Login
+// A. Auth / Login
 app.post('/api/users/auth', async (req, res) => {
   try {
     const { name, phone, role } = req.body;
@@ -129,7 +130,7 @@ app.post('/api/users/auth', async (req, res) => {
   }
 });
 
-// B. Full Driver KYC Onboarding
+// B. Driver KYC Onboarding
 app.post('/api/drivers/register', async (req, res) => {
   try {
     const {
@@ -188,7 +189,7 @@ app.post('/api/drivers/register', async (req, res) => {
 
     return res.status(201).json({
       success: true,
-      message: 'Driver KYC profile saved successfully.',
+      message: 'Driver profile registered successfully.',
       driver,
     });
   } catch (error) {
@@ -236,17 +237,29 @@ app.post('/api/rides/request', async (req, res) => {
   }
 });
 
-// D. Fetch Pending Rides (Driver Radar)
+// D. Fetch Pending Rides with Vehicle-Class Dispatch Matching (Driver Radar)
 app.get('/api/rides/available', async (req, res) => {
   try {
-    const rides = await Ride.find({ status: 'pending' }).sort({ createdAt: -1 }).limit(20);
+    const { vehicleType } = req.query;
+    const filter = { status: 'pending' };
+
+    // Strict matching so keke riders see keke, okada riders see okada, cars see cars
+    if (vehicleType) {
+      if (vehicleType === 'Cab / Micra' || vehicleType === 'Saloon Car') {
+        filter.vehicleType = { $in: ['Cab / Micra', 'Saloon Car'] };
+      } else {
+        filter.vehicleType = vehicleType;
+      }
+    }
+
+    const rides = await Ride.find(filter).sort({ createdAt: -1 }).limit(20);
     return res.json({ success: true, rides });
   } catch (error) {
     return res.status(500).json({ success: false, message: error.message });
   }
 });
 
-// E. Poll Single Ride Status
+// E. Single Ride Status
 app.get('/api/rides/:rideId', async (req, res) => {
   try {
     const ride = await Ride.findOne({ rideId: req.params.rideId });
@@ -304,7 +317,7 @@ app.post('/api/rides/start', async (req, res) => {
   }
 });
 
-// H. Complete Trip & Settle Split (Driver)
+// H. Complete Trip & Financial Settlement (85% Driver / 15% Platform)
 app.post('/api/rides/complete', async (req, res) => {
   try {
     const { rideId } = req.body;
@@ -316,7 +329,7 @@ app.post('/api/rides/complete', async (req, res) => {
 
     const totalFare = Number(ride.totalFare || ride.fare) || 0;
     const driverEarnings = Math.round(totalFare * 0.85); // 85% Cut
-    const platformFee = totalFare - driverEarnings;      // 15% Commission
+    const platformFee = totalFare - driverEarnings;      // 15% Platform
 
     ride.status = 'completed';
     ride.driverEarnings = driverEarnings;
@@ -324,7 +337,6 @@ app.post('/api/rides/complete', async (req, res) => {
     ride.completedAt = new Date();
     await ride.save();
 
-    // Credit Driver's in-app balance
     if (ride.driverId) {
       await User.findByIdAndUpdate(ride.driverId, {
         $inc: { walletBalance: driverEarnings },
