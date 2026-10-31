@@ -12,7 +12,7 @@ app.use(express.json());
 // ==========================================
 const MONGO_URI =
   process.env.MONGODB_URI ||
-  'mongodb+srv://oolusource_db_user:Olusource123@olusourcecluster.isfjl5l.mongodb.net/HappyHourLogistics?retryWrites=true&w=majority';
+  'mongodb+srv://oolusource_db_user:logiStic2026@olusourcecluster.isfjl5l.mongodb.net/HappyHourLogistics?retryWrites=true&w=majority';
 
 mongoose
   .connect(MONGO_URI)
