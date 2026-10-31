@@ -1,136 +1,150 @@
-require('dotenv').config();
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
 
 const app = express();
-app.use(cors());
-app.use(express.json());
 
 // ==========================================
-// 1. DATABASE CONNECTION (LOWERCASE CASING)
+// 1. HIGH-CAPACITY BODY PARSERS & CORS
+// ==========================================
+// Expands buffer from default 100kb to 50mb for Base64 photos
+app.use(cors({ origin: '*' }));
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ limit: '50mb', extended: true }));
+
+// Request logger for Render terminal debugging
+app.use((req, res, next) => {
+  console.log(`[${new Date().toISOString()}] ${req.method} ${req.path}`);
+  next();
+});
+
+// ==========================================
+// 2. MONGODB ATLAS CONNECTION
 // ==========================================
 const MONGO_URI =
+  process.env.MONGO_URI ||
   process.env.MONGODB_URI ||
-  'mongodb+srv://oolusource_db_user:logiStic2026@olusourcecluster.isfjl5l.mongodb.net/HappyHourLogistics?retryWrites=true&w=majority';
+  'mongodb+srv://admin:happyhour2026@cluster0.mongodb.net/happyhour?retryWrites=true&w=majority';
 
 mongoose
   .connect(MONGO_URI)
-  .then(() => console.log(' Connected to MongoDB Atlas (HappyHour Cluster)'))
-  .catch((err) => console.error(' MongoDB Connection Error:', err));
+  .then(() => console.log('✅ Connected to MongoDB Atlas Cluster'))
+  .catch((err) => console.error('❌ MongoDB Connection Error:', err));
 
 // ==========================================
-// 2. SCHEMAS & MODELS
+// 3. DATABASE SCHEMAS & MODELS
 // ==========================================
-const userSchema = new mongoose.Schema({
-  name: { type: String, required: true },
-  firstName: { type: String, default: '' },
-  surname: { type: String, default: '' },
-  phone: { type: String, required: true, unique: true },
-  role: {
-    type: String,
-    enum: ['passenger', 'driver', 'admin'],
-    default: 'passenger',
-  },
-  driverDetails: {
-    dateOfBirth: { type: String, default: '' },
-    profileImage: { type: String, default: '' },
-    yearsOfExperience: { type: Number, default: 1 },
-    licenseNumber: { type: String, default: '' },
-    vehicleType: {
-      type: String,
-      enum: ['Cab / Micra', 'Keke Marwa', 'Express Okada', 'Van / Bus', 'Saloon Car'],
-      default: 'Cab / Micra',
-    },
-    vehicleMake: { type: String, default: '' },
-    vehicleModel: { type: String, default: '' },
-    vehicleYear: { type: String, default: '' },
-    plateNumber: { type: String, default: '' },
-    serviceScope: {
-      type: String,
-      enum: ['passenger_only', 'logistics_only', 'both'],
-      default: 'both',
-    },
-    verificationStatus: {
-      type: String,
-      enum: ['pending', 'approved', 'rejected'],
-      default: 'approved',
+const UserSchema = new mongoose.Schema(
+  {
+    name: { type: String, required: true },
+    phone: { type: String, required: true },
+    role: { type: String, default: 'passenger' }, // 'passenger' | 'driver'
+    driverDetails: {
+      firstName: String,
+      surname: String,
+      dateOfBirth: String,
+      yearsOfExperience: String,
+      vehicleType: String,
+      vehicleModel: String,
+      vehicleYear: String,
+      plateNumber: String,
+      serviceScope: String,
     },
   },
-  isApprovedDriver: { type: Boolean, default: true },
-  walletBalance: { type: Number, default: 0 },
-  createdAt: { type: Date, default: Date.now },
-});
+  { timestamps: true }
+);
 
-const rideSchema = new mongoose.Schema({
-  rideId: { type: String, required: true, unique: true },
-  passengerId: { type: String },
-  passengerName: { type: String, required: true },
-  passengerPhone: { type: String, required: true },
-  pickupLocation: { type: String, required: true },
-  dropoffLocation: { type: String, required: true },
-  fare: { type: Number, required: true },
-  totalFare: { type: Number, required: true },
-  vehicleType: { type: String, default: 'Cab / Micra' },
-  status: {
-    type: String,
-    enum: ['pending', 'accepted', 'in_progress', 'completed', 'cancelled'],
-    default: 'pending',
+const RideSchema = new mongoose.Schema(
+  {
+    rideId: { type: String, required: true, unique: true },
+    passengerId: String,
+    passengerName: String,
+    passengerPhone: String,
+    serviceType: { type: String, default: 'ride' }, // 'ride' | 'logistics'
+    pickupLocation: String,
+    dropoffLocation: String,
+    fare: Number,
+    totalFare: Number,
+    baseFare: Number,
+    weightSurcharge: Number,
+    vehicleType: String,
+    coordinates: Object,
+    driverId: String,
+    driverName: String,
+    status: { type: String, default: 'pending' }, // 'pending' | 'accepted' | 'in_progress' | 'completed' | 'cancelled'
+    deliveryPin: String,
+    recipient: {
+      name: String,
+      phone: String,
+    },
+    packageDetails: {
+      description: String,
+      weightTier: String,
+      weightSurcharge: Number,
+      pickupPhotoUrl: String,
+    },
+    cargoDescription: String,
+    cargoWeightTier: String,
+    cargoRecipientName: String,
+    cargoRecipientPhone: String,
+    pickupPhotoUrl: String,
+    driverEarnings: Number,
+    platformFee: Number,
   },
-  driverId: { type: String, default: null },
-  driverName: { type: String, default: null },
-  driverPhone: { type: String, default: null },
-  driverEarnings: { type: Number, default: 0 },
-  platformFee: { type: Number, default: 0 },
-  paymentMethod: { type: String, default: 'cash' },
-  coordinates: {
-    latitude: { type: Number },
-    longitude: { type: Number },
-  },
-  createdAt: { type: Date, default: Date.now },
-  completedAt: { type: Date },
-});
+  { timestamps: true, strict: false }
+);
 
-const User = mongoose.model('User', userSchema);
-const Ride = mongoose.model('Ride', rideSchema);
+const User = mongoose.model('User', UserSchema);
+const Ride = mongoose.model('Ride', RideSchema);
 
 // ==========================================
-// 3. API ROUTES
+// 4. API ROUTES
 // ==========================================
 
-// Health Check
+// Health Check Endpoint
 app.get('/', (req, res) => {
-  res.json({ status: 'Online', service: 'HappyHour Logistics API', region: 'Ibadan, Nigeria' });
+  res.json({
+    status: 'online',
+    service: 'HappyHour Logistics API',
+    cluster: 'MongoDB Atlas',
+    timestamp: new Date().toISOString(),
+  });
 });
 
-// A. Auth / Login
+app.get('/health', (req, res) => {
+  res.json({ status: 'ok' });
+});
+
+// User / Driver Quick Authentication
 app.post('/api/users/auth', async (req, res) => {
   try {
     const { name, phone, role } = req.body;
-    if (!phone) {
-      return res.status(400).json({ success: false, message: 'Phone number is required.' });
+    if (!name || !phone) {
+      return res.status(400).json({ success: false, message: 'Name and phone are required.' });
     }
 
-    const cleanedPhone = phone.trim();
-    let user = await User.findOne({ phone: cleanedPhone });
-
+    let user = await User.findOne({ phone: phone.trim() });
     if (!user) {
-      user = await User.create({
-        name: name ? name.trim() : 'Ibadan Resident',
-        phone: cleanedPhone,
+      user = new User({
+        name: name.trim(),
+        phone: phone.trim(),
         role: role || 'passenger',
-        isApprovedDriver: role === 'driver',
       });
+      await user.save();
+    } else {
+      user.name = name.trim();
+      user.role = role || user.role;
+      await user.save();
     }
 
-    return res.json({ success: true, user });
+    res.json({ success: true, user });
   } catch (error) {
     console.error('Auth error:', error);
-    return res.status(500).json({ success: false, message: error.message });
+    res.status(500).json({ success: false, message: error.message });
   }
 });
 
-// B. Driver KYC Onboarding
+// Driver KYC Registration
 app.post('/api/drivers/register', async (req, res) => {
   try {
     const {
@@ -138,187 +152,137 @@ app.post('/api/drivers/register', async (req, res) => {
       surname,
       phone,
       dateOfBirth,
-      profileImage,
       yearsOfExperience,
-      licenseNumber,
       vehicleType,
-      vehicleMake,
       vehicleModel,
       vehicleYear,
       plateNumber,
       serviceScope,
     } = req.body;
 
-    if (!firstName || !surname || !phone || !plateNumber) {
-      return res.status(400).json({
-        success: false,
-        message: 'First name, surname, phone number, and vehicle plate number are required.',
-      });
-    }
+    const fullName = `${firstName} ${surname}`.trim();
+    let driver = await User.findOne({ phone: phone.trim() });
 
-    const cleanedPhone = phone.trim();
-    const fullName = `${firstName.trim()} ${surname.trim()}`;
-
-    const driverPayload = {
-      name: fullName,
-      firstName: firstName.trim(),
-      surname: surname.trim(),
-      phone: cleanedPhone,
-      role: 'driver',
-      isApprovedDriver: true,
-      driverDetails: {
-        dateOfBirth: dateOfBirth || '',
-        profileImage: profileImage || '',
-        yearsOfExperience: Number(yearsOfExperience) || 1,
-        licenseNumber: licenseNumber ? licenseNumber.trim().toUpperCase() : '',
-        vehicleType: vehicleType || 'Cab / Micra',
-        vehicleMake: vehicleMake ? vehicleMake.trim() : '',
-        vehicleModel: vehicleModel ? vehicleModel.trim() : '',
-        vehicleYear: vehicleYear ? vehicleYear.trim() : '',
-        plateNumber: plateNumber.trim().toUpperCase(),
-        serviceScope: serviceScope || 'both',
-        verificationStatus: 'approved',
-      },
+    const driverDetails = {
+      firstName,
+      surname,
+      dateOfBirth,
+      yearsOfExperience,
+      vehicleType,
+      vehicleModel,
+      vehicleYear,
+      plateNumber,
+      serviceScope,
     };
 
-    const driver = await User.findOneAndUpdate(
-      { phone: cleanedPhone },
-      driverPayload,
-      { new: true, upsert: true }
-    );
+    if (!driver) {
+      driver = new User({
+        name: fullName,
+        phone: phone.trim(),
+        role: 'driver',
+        driverDetails,
+      });
+    } else {
+      driver.name = fullName;
+      driver.role = 'driver';
+      driver.driverDetails = driverDetails;
+    }
 
-    return res.status(201).json({
-      success: true,
-      message: 'Driver profile registered successfully.',
-      driver,
-    });
+    await driver.save();
+    res.json({ success: true, driver });
   } catch (error) {
-    console.error('Driver KYC error:', error);
-    return res.status(500).json({ success: false, message: error.message });
+    console.error('KYC Registration Error:', error);
+    res.status(500).json({ success: false, message: error.message });
   }
 });
 
-// C. Request Ride (Passenger)
+// Request Ride / Parcel Dispatch
 app.post('/api/rides/request', async (req, res) => {
   try {
-    const {
-      passengerId,
-      passengerName,
-      passengerPhone,
-      pickupLocation,
-      dropoffLocation,
-      fare,
-      totalFare,
-      vehicleType,
-      coordinates,
-    } = req.body;
+    const payload = req.body;
+    const generatedRideId = `HH-${Math.floor(100000 + Math.random() * 900000)}`;
 
-    const rideId = `HH-${Math.floor(100000 + Math.random() * 900000)}`;
-    const tripFare = Number(fare || totalFare) || 3000;
-
-    const ride = await Ride.create({
-      rideId,
-      passengerId,
-      passengerName,
-      passengerPhone,
-      pickupLocation,
-      dropoffLocation,
-      fare: tripFare,
-      totalFare: tripFare,
-      vehicleType: vehicleType || 'Cab / Micra',
-      coordinates,
+    const newRide = new Ride({
+      ...payload,
+      rideId: payload.rideId || generatedRideId,
       status: 'pending',
     });
 
-    return res.status(201).json({ success: true, ride });
+    await newRide.save();
+    console.log(`[RIDE CREATED] ${newRide.rideId} | Type: ${newRide.serviceType}`);
+    res.json({ success: true, ride: newRide });
   } catch (error) {
-    console.error('Request ride error:', error);
-    return res.status(500).json({ success: false, message: error.message });
+    console.error('Ride Request Error:', error);
+    res.status(500).json({ success: false, message: error.message });
   }
 });
 
-// D. Fetch Pending Rides with Vehicle-Class Dispatch Matching (Driver Radar)
+// Fetch Available Rides for Driver Radar
 app.get('/api/rides/available', async (req, res) => {
   try {
     const { vehicleType } = req.query;
-    const filter = { status: 'pending' };
+    let query = { status: 'pending' };
 
-    // Strict matching so keke riders see keke, okada riders see okada, cars see cars
-    if (vehicleType) {
-      if (vehicleType === 'Cab / Micra' || vehicleType === 'Saloon Car') {
-        filter.vehicleType = { $in: ['Cab / Micra', 'Saloon Car'] };
-      } else {
-        filter.vehicleType = vehicleType;
-      }
+    if (vehicleType && vehicleType !== 'Fleet') {
+      query.vehicleType = vehicleType;
     }
 
-    const rides = await Ride.find(filter).sort({ createdAt: -1 }).limit(20);
-    return res.json({ success: true, rides });
+    const rides = await Ride.find(query).sort({ createdAt: -1 }).limit(20);
+    res.json({ success: true, rides });
   } catch (error) {
-    return res.status(500).json({ success: false, message: error.message });
+    console.error('Available Rides Error:', error);
+    res.status(500).json({ success: false, message: error.message });
   }
 });
 
-// E. Single Ride Status
+// Query Single Ride by RideID
 app.get('/api/rides/:rideId', async (req, res) => {
   try {
     const ride = await Ride.findOne({ rideId: req.params.rideId });
     if (!ride) {
       return res.status(404).json({ success: false, message: 'Ride not found' });
     }
-    return res.json({ success: true, ride });
+    res.json({ success: true, ride });
   } catch (error) {
-    return res.status(500).json({ success: false, message: error.message });
+    console.error('Single Ride Query Error:', error);
+    res.status(500).json({ success: false, message: error.message });
   }
 });
 
-// F. Accept Trip (Driver)
+// Accept Ride / Freight Order
 app.post('/api/rides/accept', async (req, res) => {
   try {
     const { rideId, driverId } = req.body;
-    const driver = await User.findById(driverId);
-
-    const ride = await Ride.findOneAndUpdate(
-      { rideId, status: 'pending' },
-      {
-        status: 'accepted',
-        driverId,
-        driverName: driver ? driver.name : 'HappyHour Captain',
-        driverPhone: driver ? driver.phone : '',
-      },
-      { new: true }
-    );
+    const ride = await Ride.findOne({ rideId });
 
     if (!ride) {
-      return res.status(400).json({
-        success: false,
-        message: 'Ride is no longer available or already taken.',
-      });
+      return res.status(404).json({ success: false, message: 'Ride not found' });
     }
 
-    return res.json({ success: true, message: 'Ride accepted successfully.', ride });
+    if (ride.status !== 'pending') {
+      return res.status(400).json({ success: false, message: 'Trip has already been claimed.' });
+    }
+
+    let driverName = 'Captain';
+    if (driverId) {
+      const driver = await User.findById(driverId);
+      if (driver) driverName = driver.name;
+    }
+
+    ride.status = 'accepted';
+    ride.driverId = driverId;
+    ride.driverName = driverName;
+    await ride.save();
+
+    res.json({ success: true, ride });
   } catch (error) {
-    return res.status(500).json({ success: false, message: error.message });
+    console.error('Accept Ride Error:', error);
+    res.status(500).json({ success: false, message: error.message });
   }
 });
 
-// G. Start Trip (Driver)
+// Start Ride / Begin Parcel Transit
 app.post('/api/rides/start', async (req, res) => {
-  try {
-    const { rideId } = req.body;
-    const ride = await Ride.findOneAndUpdate(
-      { rideId },
-      { status: 'in_progress' },
-      { new: true }
-    );
-    return res.json({ success: true, ride });
-  } catch (error) {
-    return res.status(500).json({ success: false, message: error.message });
-  }
-});
-
-// H. Complete Trip & Financial Settlement (85% Driver / 15% Platform)
-app.post('/api/rides/complete', async (req, res) => {
   try {
     const { rideId } = req.body;
     const ride = await Ride.findOne({ rideId });
@@ -327,43 +291,76 @@ app.post('/api/rides/complete', async (req, res) => {
       return res.status(404).json({ success: false, message: 'Ride not found' });
     }
 
-    const totalFare = Number(ride.totalFare || ride.fare) || 0;
-    const driverEarnings = Math.round(totalFare * 0.85); // 85% Cut
-    const platformFee = totalFare - driverEarnings;      // 15% Platform
+    ride.status = 'in_progress';
+    await ride.save();
+
+    res.json({ success: true, ride });
+  } catch (error) {
+    console.error('Start Ride Error:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// Conclude Trip & Settle 85/15 Commission Split
+app.post('/api/rides/complete', async (req, res) => {
+  try {
+    const { rideId, deliveryPin } = req.body;
+    const ride = await Ride.findOne({ rideId });
+
+    if (!ride) {
+      return res.status(404).json({ success: false, message: 'Ride not found' });
+    }
+
+    // Security PIN Escrow Verification for Freight Deliveries
+    if (ride.serviceType === 'logistics' && ride.deliveryPin) {
+      if (!deliveryPin || deliveryPin.trim() !== ride.deliveryPin.trim()) {
+        return res.status(400).json({
+          success: false,
+          message: 'Security PIN Mismatch. Delivery handover cannot be confirmed.',
+        });
+      }
+    }
+
+    const finalFare = Number(ride.totalFare || ride.fare || 3000);
+    const driverEarnings = Math.round(finalFare * 0.85);
+    const platformFee = Math.round(finalFare * 0.15);
 
     ride.status = 'completed';
     ride.driverEarnings = driverEarnings;
     ride.platformFee = platformFee;
-    ride.completedAt = new Date();
     await ride.save();
 
-    if (ride.driverId) {
-      await User.findByIdAndUpdate(ride.driverId, {
-        $inc: { walletBalance: driverEarnings },
-      });
-    }
-
-    return res.json({
+    res.json({
       success: true,
-      message: 'Trip completed successfully.',
       ride,
       receipt: {
-        totalFare,
+        totalFare: finalFare,
         driverEarnings,
         platformFee,
         paymentMethod: 'Cash',
       },
     });
   } catch (error) {
-    console.error('Complete ride error:', error);
-    return res.status(500).json({ success: false, message: error.message });
+    console.error('Complete Ride Error:', error);
+    res.status(500).json({ success: false, message: error.message });
   }
 });
 
 // ==========================================
-// 4. SERVER INITIALIZATION
+// 5. GLOBAL ERROR HANDLING & PORT BINDING
 // ==========================================
-const PORT = process.env.PORT || 10000;
+app.use((err, req, res, next) => {
+  if (err.type === 'entity.too.large') {
+    return res.status(413).json({
+      success: false,
+      message: 'Attached photo payload exceeds maximum upload limits.',
+    });
+  }
+  console.error('Unhandled Server Exception:', err);
+  res.status(500).json({ success: false, message: 'Internal Server Error' });
+});
+
+const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
-  console.log(` HappyHour Logistics Backend active on port ${PORT}`);
+  console.log(`🚀 HappyHour Logistics Server listening on port ${PORT}`);
 });
