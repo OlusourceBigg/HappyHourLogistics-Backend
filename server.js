@@ -11,8 +11,8 @@ app.use(express.json());
 // 1. DATABASE CONNECTION (LOWERCASE CASING)
 // ==========================================
 const MONGO_URI =
-  process.env.MONGO_URI ||
-  'mongodb+srv://oolusource_db_user:Olusource123@olusourcecluster.isfjl5l.mongodb.net/happyhourlogistics?retryWrites=true&w=majority';
+  process.env.MONGODB_URI ||
+  'mongodb+srv://oolusource_db_user:Olusource123@olusourcecluster.isfjl5l.mongodb.net/HappyHourLogistics?retryWrites=true&w=majority';
 
 mongoose
   .connect(MONGO_URI)
