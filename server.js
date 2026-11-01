@@ -7,12 +7,10 @@ const app = express();
 // ==========================================
 // 1. HIGH-CAPACITY BODY PARSERS & CORS
 // ==========================================
-// Expands buffer from default 100kb to 50mb for Base64 photos
 app.use(cors({ origin: '*' }));
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
-// Request logger for Render terminal debugging
 app.use((req, res, next) => {
   console.log(`[${new Date().toISOString()}] ${req.method} ${req.path}`);
   next();
@@ -39,6 +37,7 @@ const UserSchema = new mongoose.Schema(
     name: { type: String, required: true },
     phone: { type: String, required: true },
     role: { type: String, default: 'passenger' }, // 'passenger' | 'driver'
+    primaryHub: { type: String, default: 'Bodija Market' },
     driverDetails: {
       firstName: String,
       surname: String,
@@ -63,6 +62,8 @@ const RideSchema = new mongoose.Schema(
     serviceType: { type: String, default: 'ride' }, // 'ride' | 'logistics'
     pickupLocation: String,
     dropoffLocation: String,
+    distanceKm: Number,
+    estimatedMinutes: Number,
     fare: Number,
     totalFare: Number,
     baseFare: Number,
@@ -98,10 +99,10 @@ const User = mongoose.model('User', UserSchema);
 const Ride = mongoose.model('Ride', RideSchema);
 
 // ==========================================
-// 4. API ROUTES
+// 4. API ENDPOINTS
 // ==========================================
 
-// Health Check Endpoint
+// Health Check
 app.get('/', (req, res) => {
   res.json({
     status: 'online',
@@ -115,31 +116,34 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok' });
 });
 
-// User / Driver Quick Authentication
+// User Sign-Up & Sign-In Auth
 app.post('/api/users/auth', async (req, res) => {
   try {
-    const { name, phone, role } = req.body;
-    if (!name || !phone) {
-      return res.status(400).json({ success: false, message: 'Name and phone are required.' });
+    const { name, phone, role, primaryHub, isSignUp } = req.body;
+    if (!phone) {
+      return res.status(400).json({ success: false, message: 'Phone number is required.' });
     }
 
     let user = await User.findOne({ phone: phone.trim() });
+
     if (!user) {
       user = new User({
-        name: name.trim(),
+        name: name ? name.trim() : 'Passenger',
         phone: phone.trim(),
         role: role || 'passenger',
+        primaryHub: primaryHub || 'Bodija Market',
       });
       await user.save();
     } else {
-      user.name = name.trim();
+      if (name && isSignUp) user.name = name.trim();
+      if (primaryHub) user.primaryHub = primaryHub;
       user.role = role || user.role;
       await user.save();
     }
 
     res.json({ success: true, user });
   } catch (error) {
-    console.error('Auth error:', error);
+    console.error('Auth Error:', error);
     res.status(500).json({ success: false, message: error.message });
   }
 });
@@ -196,7 +200,7 @@ app.post('/api/drivers/register', async (req, res) => {
   }
 });
 
-// Request Ride / Parcel Dispatch
+// Dispatch Booking Request
 app.post('/api/rides/request', async (req, res) => {
   try {
     const payload = req.body;
@@ -209,7 +213,7 @@ app.post('/api/rides/request', async (req, res) => {
     });
 
     await newRide.save();
-    console.log(`[RIDE CREATED] ${newRide.rideId} | Type: ${newRide.serviceType}`);
+    console.log(`[RIDE CREATED] ${newRide.rideId} | ${newRide.serviceType} | Fare: ₦${newRide.totalFare || newRide.fare}`);
     res.json({ success: true, ride: newRide });
   } catch (error) {
     console.error('Ride Request Error:', error);
@@ -217,7 +221,7 @@ app.post('/api/rides/request', async (req, res) => {
   }
 });
 
-// Fetch Available Rides for Driver Radar
+// Available Rides Radar Query
 app.get('/api/rides/available', async (req, res) => {
   try {
     const { vehicleType } = req.query;
@@ -227,15 +231,15 @@ app.get('/api/rides/available', async (req, res) => {
       query.vehicleType = vehicleType;
     }
 
-    const rides = await Ride.find(query).sort({ createdAt: -1 }).limit(20);
+    const rides = await Ride.find(query).sort({ createdAt: -1 }).limit(25);
     res.json({ success: true, rides });
   } catch (error) {
-    console.error('Available Rides Error:', error);
+    console.error('Radar Query Error:', error);
     res.status(500).json({ success: false, message: error.message });
   }
 });
 
-// Query Single Ride by RideID
+// Single Ride Status Query
 app.get('/api/rides/:rideId', async (req, res) => {
   try {
     const ride = await Ride.findOne({ rideId: req.params.rideId });
@@ -249,7 +253,7 @@ app.get('/api/rides/:rideId', async (req, res) => {
   }
 });
 
-// Accept Ride / Freight Order
+// Accept Ride Order
 app.post('/api/rides/accept', async (req, res) => {
   try {
     const { rideId, driverId } = req.body;
@@ -260,7 +264,7 @@ app.post('/api/rides/accept', async (req, res) => {
     }
 
     if (ride.status !== 'pending') {
-      return res.status(400).json({ success: false, message: 'Trip has already been claimed.' });
+      return res.status(400).json({ success: false, message: 'Order has already been claimed.' });
     }
 
     let driverName = 'Captain';
@@ -281,7 +285,7 @@ app.post('/api/rides/accept', async (req, res) => {
   }
 });
 
-// Start Ride / Begin Parcel Transit
+// Start Transit Route
 app.post('/api/rides/start', async (req, res) => {
   try {
     const { rideId } = req.body;
@@ -296,12 +300,12 @@ app.post('/api/rides/start', async (req, res) => {
 
     res.json({ success: true, ride });
   } catch (error) {
-    console.error('Start Ride Error:', error);
+    console.error('Start Route Error:', error);
     res.status(500).json({ success: false, message: error.message });
   }
 });
 
-// Conclude Trip & Settle 85/15 Commission Split
+// Verify Recipient PIN & Conclude Delivery
 app.post('/api/rides/complete', async (req, res) => {
   try {
     const { rideId, deliveryPin } = req.body;
@@ -311,12 +315,11 @@ app.post('/api/rides/complete', async (req, res) => {
       return res.status(404).json({ success: false, message: 'Ride not found' });
     }
 
-    // Security PIN Escrow Verification for Freight Deliveries
     if (ride.serviceType === 'logistics' && ride.deliveryPin) {
       if (!deliveryPin || deliveryPin.trim() !== ride.deliveryPin.trim()) {
         return res.status(400).json({
           success: false,
-          message: 'Security PIN Mismatch. Delivery handover cannot be confirmed.',
+          message: 'Security PIN Mismatch. Goods handover verification failed.',
         });
       }
     }
@@ -346,21 +349,19 @@ app.post('/api/rides/complete', async (req, res) => {
   }
 });
 
-// ==========================================
-// 5. GLOBAL ERROR HANDLING & PORT BINDING
-// ==========================================
+// Error Guard
 app.use((err, req, res, next) => {
   if (err.type === 'entity.too.large') {
     return res.status(413).json({
       success: false,
-      message: 'Attached photo payload exceeds maximum upload limits.',
+      message: 'Attached photo payload exceeds upload limit.',
     });
   }
-  console.error('Unhandled Server Exception:', err);
+  console.error('Server Error:', err);
   res.status(500).json({ success: false, message: 'Internal Server Error' });
 });
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
-  console.log(`🚀 HappyHour Logistics Server listening on port ${PORT}`);
+  console.log(`🚀 HappyHour Logistics Server running on port ${PORT}`);
 });
