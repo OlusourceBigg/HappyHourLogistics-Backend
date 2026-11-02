@@ -1,14 +1,24 @@
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
+const crypto = require('crypto');
 
 const app = express();
 
 // ==========================================
-// 1. BODY PARSERS & CORS
+// 1. BODY PARSERS (RAW BUFFER CAPTURE FOR PAYSTACK)
 // ==========================================
 app.use(cors({ origin: '*' }));
-app.use(express.json({ limit: '50mb' }));
+
+// Raw buffer capture ensures exact HMAC-SHA512 signature verification
+app.use(
+  express.json({
+    limit: '50mb',
+    verify: (req, res, buf) => {
+      req.rawBody = buf;
+    },
+  })
+);
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
 app.use((req, res, next) => {
@@ -45,17 +55,19 @@ const UserSchema = new mongoose.Schema(
   {
     name: { type: String, required: true },
     phone: { type: String, required: true },
+    email: { type: String },
     role: { type: String, default: 'passenger' }, // 'passenger' | 'driver'
     primaryHub: { type: String, default: 'Bodija Market' },
-    
-    // Wallet & Overdraft Tracking
-    walletBalance: { type: Number, default: 500 }, // ₦500 Welcome Starter Credit
-    isSuspendedFromRadar: { type: Boolean, default: false }, // Triggered when balance < -₦2,500
+
+    // Commission Wallet & Overdraft Tracking
+    walletBalance: { type: Number, default: 500 }, // ₦500 Welcome Bonus Credit
+    isSuspendedFromRadar: { type: Boolean, default: false }, // Lockout threshold: -₦2,500
     transactions: [TransactionSchema],
 
     driverDetails: {
       firstName: String,
       surname: String,
+      email: String,
       dateOfBirth: String,
       yearsOfExperience: String,
       vehicleType: String,
@@ -63,6 +75,8 @@ const UserSchema = new mongoose.Schema(
       vehicleYear: String,
       plateNumber: String,
       serviceScope: String,
+      dvaAccountNumber: String,
+      dvaBankName: String,
     },
   },
   { timestamps: true }
@@ -114,7 +128,7 @@ const User = mongoose.model('User', UserSchema);
 const Ride = mongoose.model('Ride', RideSchema);
 
 // ==========================================
-// 4. API ENDPOINTS
+// 4. GENERAL ENDPOINTS
 // ==========================================
 
 // Health Check
@@ -134,7 +148,7 @@ app.get('/health', (req, res) => {
 // User Sign-Up & Sign-In Auth
 app.post('/api/users/auth', async (req, res) => {
   try {
-    const { name, phone, role, primaryHub, isSignUp } = req.body;
+    const { name, phone, email, role, primaryHub, isSignUp } = req.body;
     if (!phone) {
       return res.status(400).json({ success: false, message: 'Phone number is required.' });
     }
@@ -145,6 +159,7 @@ app.post('/api/users/auth', async (req, res) => {
       user = new User({
         name: name ? name.trim() : 'Passenger',
         phone: phone.trim(),
+        email: email ? email.trim().toLowerCase() : undefined,
         role: role || 'passenger',
         primaryHub: primaryHub || 'Bodija Market',
         walletBalance: 500, // Welcome credit
@@ -152,6 +167,7 @@ app.post('/api/users/auth', async (req, res) => {
       await user.save();
     } else {
       if (name && isSignUp) user.name = name.trim();
+      if (email) user.email = email.trim().toLowerCase();
       if (primaryHub) user.primaryHub = primaryHub;
       user.role = role || user.role;
       await user.save();
@@ -171,6 +187,7 @@ app.post('/api/drivers/register', async (req, res) => {
       firstName,
       surname,
       phone,
+      email,
       dateOfBirth,
       yearsOfExperience,
       vehicleType,
@@ -186,6 +203,7 @@ app.post('/api/drivers/register', async (req, res) => {
     const driverDetails = {
       firstName,
       surname,
+      email: email ? email.trim().toLowerCase() : undefined,
       dateOfBirth,
       yearsOfExperience,
       vehicleType,
@@ -199,13 +217,15 @@ app.post('/api/drivers/register', async (req, res) => {
       driver = new User({
         name: fullName,
         phone: phone.trim(),
+        email: email ? email.trim().toLowerCase() : undefined,
         role: 'driver',
-        walletBalance: 500, // ₦500 Welcome Bonus Credit
+        walletBalance: 500, // ₦500 Welcome bonus credit
         driverDetails,
       });
     } else {
       driver.name = fullName;
       driver.role = 'driver';
+      if (email) driver.email = email.trim().toLowerCase();
       driver.driverDetails = driverDetails;
     }
 
@@ -233,7 +253,7 @@ app.get('/api/wallet/:userId', async (req, res) => {
       success: true,
       walletBalance: user.walletBalance || 0,
       isSuspendedFromRadar: Boolean(user.isSuspendedFromRadar),
-      transactions: (user.transactions || []).reverse().slice(0, 20), // Last 20 transactions
+      transactions: (user.transactions || []).reverse().slice(0, 30),
     });
   } catch (error) {
     console.error('Wallet Query Error:', error);
@@ -241,7 +261,7 @@ app.get('/api/wallet/:userId', async (req, res) => {
   }
 });
 
-// Top-Up Driver Wallet (Bank Transfer / DVA / Top-Up Card)
+// Top-Up Driver Wallet (Direct Simulation / Testing)
 app.post('/api/wallet/topup', async (req, res) => {
   try {
     const { userId, amount, description } = req.body;
@@ -257,7 +277,7 @@ app.post('/api/wallet/topup', async (req, res) => {
     }
 
     const newBalance = (user.walletBalance || 0) + topupAmount;
-    const isNowActive = newBalance >= -2500; // Unfreezes radar if above overdraft limit
+    const isNowActive = newBalance >= -2500;
 
     const transactionRecord = {
       transactionId: `TOP-${Date.now()}-${Math.floor(100 + Math.random() * 900)}`,
@@ -286,6 +306,118 @@ app.post('/api/wallet/topup', async (req, res) => {
   }
 });
 
+// ==========================================
+// 6. PAYSTACK DVA LIVE WEBHOOK HANDLER
+// ==========================================
+app.post('/api/webhooks/paystack', async (req, res) => {
+  const paystackSecret = process.env.PAYSTACK_SECRET_KEY;
+  const signature = req.headers['x-paystack-signature'];
+
+  if (!paystackSecret) {
+    console.error('❌ PAYSTACK_SECRET_KEY environment variable is not defined.');
+    return res.status(500).send('Server configuration error');
+  }
+
+  if (!signature || !req.rawBody) {
+    return res.status(401).send('Missing webhook signature or raw payload');
+  }
+
+  // 1. Verify HMAC SHA-512 signature
+  const hash = crypto
+    .createHmac('sha512', paystackSecret)
+    .update(req.rawBody)
+    .digest('hex');
+
+  if (hash !== signature) {
+    console.warn('⚠️ Untrusted Webhook Attempt: Signature mismatch detected.');
+    return res.status(401).send('Invalid signature');
+  }
+
+  // 2. Acknowledge Paystack immediately with 200 OK
+  res.status(200).send('Webhook acknowledged');
+
+  // 3. Process the event asynchronously
+  try {
+    const event = req.body;
+
+    if (event.event === 'charge.success') {
+      const data = event.data;
+      const transferAmountNaira = data.amount / 100; // Paystack sends amounts in Kobo
+      const reference = data.reference;
+      const customerPhone = data.customer?.phone;
+      const customerEmail = data.customer?.email;
+
+      console.log(`[PAYSTACK WEBHOOK] Successful deposit received: ₦${transferAmountNaira.toLocaleString()} (Ref: ${reference})`);
+
+      // 4. Locate Driver (Match last 10 digits of Nigerian phone number)
+      let driver = null;
+      if (customerPhone) {
+        const cleanPhone = customerPhone.replace(/[^0-9]/g, '');
+        const last10Digits = cleanPhone.slice(-10);
+        driver = await User.findOne({
+          role: 'driver',
+          phone: { $regex: new RegExp(last10Digits + '$') },
+        });
+      }
+
+      // Fallback search by email
+      if (!driver && customerEmail) {
+        driver = await User.findOne({
+          role: 'driver',
+          $or: [
+            { email: customerEmail.trim().toLowerCase() },
+            { 'driverDetails.email': customerEmail.trim().toLowerCase() },
+          ],
+        });
+      }
+
+      if (!driver) {
+        console.warn(`[PAYSTACK WEBHOOK] Unmatched Captain deposit. Phone: ${customerPhone}, Email: ${customerEmail}`);
+        return;
+      }
+
+      // 5. Idempotency Check: Prevent duplicate credits on retry deliveries
+      const alreadyCredited = driver.transactions?.some(
+        (tx) => tx.transactionId === reference
+      );
+      if (alreadyCredited) {
+        console.log(`[PAYSTACK WEBHOOK] Reference ${reference} was already credited to Captain ${driver.name}. Skipping.`);
+        return;
+      }
+
+      // 6. Atomic Balance Credit & Overdraft Evaluation
+      const balanceBefore = driver.walletBalance || 0;
+      const newBalance = balanceBefore + transferAmountNaira;
+      const isNowActive = newBalance >= -2500; // Unfreezes radar if above -₦2,500 limit
+
+      const creditTransaction = {
+        transactionId: reference,
+        type: 'credit',
+        amount: transferAmountNaira,
+        description: `Direct Bank Transfer (DVA) • ${data.authorization?.bank || 'Bank Deposit'}`,
+        balanceAfter: newBalance,
+        date: new Date(data.paid_at || Date.now()),
+      };
+
+      driver.walletBalance = newBalance;
+      driver.isSuspendedFromRadar = !isNowActive;
+      driver.transactions.push(creditTransaction);
+
+      await driver.save();
+
+      console.log(
+        `✅ [WALLET CREDITED] Captain ${driver.name} (+₦${transferAmountNaira.toLocaleString()}) | Old: ₦${balanceBefore} -> New: ₦${newBalance} | Radar Suspended: ${driver.isSuspendedFromRadar}`
+      );
+    }
+  } catch (err) {
+    console.error('❌ Error processing Paystack webhook event:', err);
+  }
+});
+
+// ==========================================
+// 7. RIDE & LOGISTICS DISPATCH ENGINE
+// ==========================================
+
 // Dispatch Booking Request
 app.post('/api/rides/request', async (req, res) => {
   try {
@@ -312,7 +444,6 @@ app.get('/api/rides/available', async (req, res) => {
   try {
     const { vehicleType, driverId } = req.query;
 
-    // Check if the requesting driver is suspended due to excessive overdraft
     if (driverId) {
       const driver = await User.findById(driverId);
       if (driver && driver.isSuspendedFromRadar) {
