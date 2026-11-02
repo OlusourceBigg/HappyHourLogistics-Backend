@@ -58,14 +58,14 @@ const UserSchema = new mongoose.Schema(
     role: { type: String, enum: ['passenger', 'driver'], default: 'passenger' },
     primaryHub: { type: String, default: 'Bodija Market' },
     
-    // OPay-Style Profile Attributes
+    // Profile Attributes
     avatarUrl: { type: String, default: null },
     gender: { type: String, default: 'Male' },
-    accountTier: { type: String, default: 'Tier 1' }, // Tier 1 (Passenger) or Tier 3 (Captain)
+    accountTier: { type: String, default: 'Tier 1' },
 
     // Commission Wallet & Overdraft Tracking
-    walletBalance: { type: Number, default: 500 }, // ₦500 Welcome Bonus Credit
-    isSuspendedFromRadar: { type: Boolean, default: false }, // Locked if balance < -₦2,500
+    walletBalance: { type: Number, default: 500 },
+    isSuspendedFromRadar: { type: Boolean, default: false },
     transactions: [TransactionSchema],
 
     driverDetails: {
@@ -145,7 +145,6 @@ app.post('/api/users/auth', async (req, res) => {
     const cleanPhone = phone.trim();
     const targetRole = role || 'passenger';
 
-    // Query by BOTH phone and role to prevent role collision
     let user = await User.findOne({ phone: cleanPhone, role: targetRole });
 
     if (!user) {
@@ -156,7 +155,6 @@ app.post('/api/users/auth', async (req, res) => {
         });
       }
 
-      // Create new Passenger
       user = new User({
         name: name ? name.trim() : 'Passenger',
         phone: cleanPhone,
@@ -222,7 +220,7 @@ app.post('/api/drivers/register', async (req, res) => {
         email: email ? email.trim().toLowerCase() : '',
         role: 'driver',
         accountTier: 'Tier 3',
-        walletBalance: 500, // ₦500 Welcome bonus credit
+        walletBalance: 500,
         driverDetails,
       });
     } else {
@@ -240,7 +238,7 @@ app.post('/api/drivers/register', async (req, res) => {
   }
 });
 
-// Update Profile (Avatar, Email, Gender)
+// Update Profile
 app.put('/api/users/profile/:userId', async (req, res) => {
   try {
     const { avatarUrl, email, gender, name } = req.body;
@@ -264,7 +262,7 @@ app.put('/api/users/profile/:userId', async (req, res) => {
 });
 
 // ==========================================
-// 5. WALLET & PAYSTACK WEBHOOK
+// 5. WALLET & TOP-UP SIMULATION
 // ==========================================
 app.get('/api/wallet/:userId', async (req, res) => {
   try {
@@ -321,7 +319,9 @@ app.post('/api/wallet/topup', async (req, res) => {
   }
 });
 
-// Paystack DVA Webhook Handler
+// ==========================================
+// 6. PAYSTACK DVA WEBHOOK HANDLER
+// ==========================================
 app.post('/api/webhooks/paystack', async (req, res) => {
   const paystackSecret = process.env.PAYSTACK_SECRET_KEY;
   const signature = req.headers['x-paystack-signature'];
@@ -381,7 +381,7 @@ app.post('/api/webhooks/paystack', async (req, res) => {
 });
 
 // ==========================================
-// 6. RIDES & DISPATCH ENGINE
+// 7. RIDES & DISPATCH ENGINE
 // ==========================================
 app.post('/api/rides/request', async (req, res) => {
   try {
@@ -515,6 +515,145 @@ app.post('/api/rides/complete', async (req, res) => {
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
+});
+
+// ==========================================
+// 8. PAYSTACK MULTI-CHANNEL TRANSACTION ENGINE
+// ==========================================
+
+// Initialize Card, USSD, or Bank App Checkout
+app.post('/api/payment/initialize', async (req, res) => {
+  try {
+    const { userId, amount, email, channelType } = req.body;
+    const topupAmount = Number(amount);
+
+    if (!topupAmount || topupAmount < 100) {
+      return res.status(400).json({ success: false, message: 'Minimum transaction amount is ₦100.' });
+    }
+
+    const user = await User.findById(userId);
+    if (!user) {
+      return res.status(404).json({ success: false, message: 'User account not found.' });
+    }
+
+    const reference = `HH_PAY_${Date.now()}_${Math.floor(1000 + Math.random() * 9000)}`;
+    const userEmail = email || user.email || `${user.phone.replace(/[^0-9]/g, '')}@happyhourlogistics.ng`;
+
+    const channels = channelType
+      ? [channelType]
+      : ['card', 'bank', 'ussd', 'bank_transfer'];
+
+    const paystackPayload = JSON.stringify({
+      email: userEmail,
+      amount: topupAmount * 100, // Paystack requires amounts in Kobo
+      reference,
+      currency: 'NGN',
+      channels,
+      callback_url: 'https://happyhourlogistics-backend.onrender.com/api/payment/callback',
+      metadata: {
+        userId: user._id.toString(),
+        userName: user.name,
+        userRole: user.role,
+        purpose: user.role === 'driver' ? 'driver_commission_topup' : 'passenger_wallet_credit',
+      },
+    });
+
+    const response = await fetch('https://api.paystack.co/transaction/initialize', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: paystackPayload,
+    });
+
+    const data = await response.json();
+
+    if (data.status && data.data) {
+      res.json({
+        success: true,
+        authorizationUrl: data.data.authorization_url,
+        accessCode: data.data.access_code,
+        reference,
+      });
+    } else {
+      res.status(400).json({ success: false, message: data.message || 'Unable to initialize checkout.' });
+    }
+  } catch (error) {
+    console.error('Paystack Initialize Error:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// Client Payment Verification (Instant Check Fallback)
+app.get('/api/payment/verify/:reference', async (req, res) => {
+  try {
+    const { reference } = req.params;
+
+    const response = await fetch(`https://api.paystack.co/transaction/verify/${encodeURIComponent(reference)}`, {
+      method: 'GET',
+      headers: {
+        Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`,
+      },
+    });
+
+    const data = await response.json();
+
+    if (data.status && data.data.status === 'success') {
+      const verifiedAmount = data.data.amount / 100;
+      const userId = data.data.metadata?.userId;
+
+      if (userId) {
+        const user = await User.findById(userId);
+        if (user) {
+          const alreadyCredited = user.transactions?.some((tx) => tx.transactionId === reference);
+
+          if (!alreadyCredited) {
+            const newBalance = (user.walletBalance || 0) + verifiedAmount;
+            const isNowActive = newBalance >= -2500;
+
+            user.walletBalance = newBalance;
+            user.isSuspendedFromRadar = !isNowActive;
+            user.transactions.push({
+              transactionId: reference,
+              type: 'credit',
+              amount: verifiedAmount,
+              description: `Paystack Checkout (${data.data.channel?.toUpperCase() || 'ONLINE'})`,
+              balanceAfter: newBalance,
+              date: new Date(),
+            });
+
+            await user.save();
+          }
+
+          return res.json({
+            success: true,
+            verified: true,
+            walletBalance: user.walletBalance,
+            isSuspendedFromRadar: user.isSuspendedFromRadar,
+          });
+        }
+      }
+
+      return res.json({ success: true, verified: true, data: data.data });
+    } else {
+      return res.json({ success: false, verified: false, message: 'Transaction unverified or pending.' });
+    }
+  } catch (error) {
+    console.error('Paystack Verification Error:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// ==========================================
+// 9. ERROR GUARD & SERVER LISTENER
+// ==========================================
+app.use((err, req, res, next) => {
+  if (err.type === 'entity.too.large') {
+    return res.status(413).json({ success: false, message: 'Photo payload exceeds limit.' });
+  }
+  console.error('Server Error:', err);
+  res.status(500).json({ success: false, message: 'Internal Server Error' });
 });
 
 const PORT = process.env.PORT || 5000;
