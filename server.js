@@ -14,7 +14,7 @@ app.use(
   express.json({
     limit: '50mb',
     verify: (req, res, buf) => {
-      req.rawBody = buf; // Preserves raw buffer for HMAC verification
+      req.rawBody = buf; // Preserves raw buffer for HMAC-SHA512 verification
     },
   })
 );
@@ -39,7 +39,7 @@ mongoose
   .catch((err) => console.error('❌ MongoDB Connection Error:', err));
 
 // ==========================================
-// 3. SCHEMAS & MODELS (WITH OPAY-STYLE PROFILE)
+// 3. SCHEMAS & MODELS (100% CASHLESS + SUBACCOUNTS)
 // ==========================================
 const TransactionSchema = new mongoose.Schema({
   transactionId: { type: String, required: true },
@@ -57,14 +57,12 @@ const UserSchema = new mongoose.Schema(
     email: { type: String, default: '' },
     role: { type: String, enum: ['passenger', 'driver'], default: 'passenger' },
     primaryHub: { type: String, default: 'Bodija Market' },
-    
-    // Profile Attributes
     avatarUrl: { type: String, default: null },
     gender: { type: String, default: 'Male' },
     accountTier: { type: String, default: 'Tier 1' },
 
-    // Commission Wallet & Overdraft Tracking
-    walletBalance: { type: Number, default: 500 },
+    // In-App Cashless Wallet (Both Passenger & Driver)
+    walletBalance: { type: Number, default: 1000 }, // ₦1,000 Starter Credit
     isSuspendedFromRadar: { type: Boolean, default: false },
     transactions: [TransactionSchema],
 
@@ -75,9 +73,15 @@ const UserSchema = new mongoose.Schema(
       yearsOfExperience: String,
       vehicleType: { type: String, default: 'Cab / Micra' },
       vehicleModel: String,
-      vehicleYear: String,
       plateNumber: String,
       serviceScope: { type: String, default: 'both' },
+
+      // Driver Bank Settlement Fields for Paystack 85% Auto-Split
+      bankName: String,
+      bankCode: String,
+      accountNumber: String,
+      accountName: String,
+      paystackSubaccountCode: String, // e.g. SUB_xxxxxxxxxx
     },
   },
   { timestamps: true }
@@ -104,6 +108,8 @@ const RideSchema = new mongoose.Schema(
     driverName: String,
     status: { type: String, default: 'pending' },
     deliveryPin: String,
+    paymentMethod: { type: String, default: 'wallet' }, // 'wallet' | 'bank_transfer'
+    paymentStatus: { type: String, default: 'pending' }, // 'pending' | 'settled'
     recipient: { name: String, phone: String },
     packageDetails: {
       description: String,
@@ -116,8 +122,8 @@ const RideSchema = new mongoose.Schema(
     cargoRecipientName: String,
     cargoRecipientPhone: String,
     pickupPhotoUrl: String,
-    driverEarnings: Number,
-    platformFee: Number,
+    driverEarnings: Number, // 85% Cut
+    platformFee: Number,    // 15% Cut
   },
   { timestamps: true, strict: false }
 );
@@ -126,15 +132,13 @@ const User = mongoose.model('User', UserSchema);
 const Ride = mongoose.model('Ride', RideSchema);
 
 // ==========================================
-// 4. AUTH & PROFILE MANAGEMENT ENDPOINTS
+// 4. AUTH & PROFILE MANAGEMENT
 // ==========================================
-
-// Health Check
 app.get('/', (req, res) => {
-  res.json({ status: 'online', service: 'HappyHour API', timestamp: new Date().toISOString() });
+  res.json({ status: 'online', service: 'HappyHour Logistics Cashless API', timestamp: new Date().toISOString() });
 });
 
-// Role-Isolated Sign-Up / Sign-In
+// Role-Isolated Auth
 app.post('/api/users/auth', async (req, res) => {
   try {
     const { name, phone, email, role, primaryHub, isSignUp } = req.body;
@@ -162,7 +166,7 @@ app.post('/api/users/auth', async (req, res) => {
         role: 'passenger',
         accountTier: 'Tier 1',
         primaryHub: primaryHub || 'Bodija Market',
-        walletBalance: 500,
+        walletBalance: 1000,
       });
       await user.save();
     } else {
@@ -179,7 +183,7 @@ app.post('/api/users/auth', async (req, res) => {
   }
 });
 
-// Driver KYC Registration
+// Driver KYC with Automated Paystack Subaccount Creation
 app.post('/api/drivers/register', async (req, res) => {
   try {
     const {
@@ -191,16 +195,46 @@ app.post('/api/drivers/register', async (req, res) => {
       yearsOfExperience,
       vehicleType,
       vehicleModel,
-      vehicleYear,
       plateNumber,
       serviceScope,
+      bankCode,
+      bankName,
+      accountNumber,
     } = req.body;
 
     const cleanPhone = phone.trim();
     const fullName = `${firstName} ${surname}`.trim();
+    let subaccountCode = null;
+
+    // Create Paystack Subaccount for 85% Auto-Split
+    if (bankCode && accountNumber && process.env.PAYSTACK_SECRET_KEY) {
+      try {
+        const subRes = await fetch('https://api.paystack.co/subaccount', {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            business_name: `${fullName} (HappyHour Captain)`,
+            settlement_bank: bankCode,
+            account_number: accountNumber.trim(),
+            percentage_charge: 15, // Platform retains 15%, Driver gets 85%
+            description: `Automated 85% payout subaccount for Captain ${fullName}`,
+          }),
+        });
+
+        const subData = await subRes.json();
+        if (subData.status && subData.data?.subaccount_code) {
+          subaccountCode = subData.data.subaccount_code;
+          console.log(`✅ [PAYSTACK SUBACCOUNT] Created: ${subaccountCode} for ${fullName}`);
+        }
+      } catch (subErr) {
+        console.warn('⚠️ Paystack subaccount deferred:', subErr.message);
+      }
+    }
 
     let driver = await User.findOne({ phone: cleanPhone, role: 'driver' });
-
     const driverDetails = {
       firstName,
       surname,
@@ -208,25 +242,27 @@ app.post('/api/drivers/register', async (req, res) => {
       yearsOfExperience,
       vehicleType,
       vehicleModel,
-      vehicleYear,
       plateNumber,
       serviceScope,
+      bankCode,
+      bankName,
+      accountNumber,
+      paystackSubaccountCode: subaccountCode,
     };
 
     if (!driver) {
       driver = new User({
         name: fullName,
         phone: cleanPhone,
-        email: email ? email.trim().toLowerCase() : '',
+        email: email || '',
         role: 'driver',
         accountTier: 'Tier 3',
-        walletBalance: 500,
+        walletBalance: 1000,
         driverDetails,
       });
     } else {
       driver.name = fullName;
       driver.accountTier = 'Tier 3';
-      if (email) driver.email = email.trim().toLowerCase();
       driver.driverDetails = driverDetails;
     }
 
@@ -244,9 +280,7 @@ app.put('/api/users/profile/:userId', async (req, res) => {
     const { avatarUrl, email, gender, name } = req.body;
     const user = await User.findById(req.params.userId);
 
-    if (!user) {
-      return res.status(404).json({ success: false, message: 'User not found.' });
-    }
+    if (!user) return res.status(404).json({ success: false, message: 'User not found.' });
 
     if (avatarUrl !== undefined) user.avatarUrl = avatarUrl;
     if (email !== undefined) user.email = email.trim().toLowerCase();
@@ -256,13 +290,12 @@ app.put('/api/users/profile/:userId', async (req, res) => {
     await user.save();
     res.json({ success: true, user });
   } catch (error) {
-    console.error('Profile Update Error:', error);
     res.status(500).json({ success: false, message: error.message });
   }
 });
 
 // ==========================================
-// 5. WALLET & TOP-UP SIMULATION
+// 5. WALLET & TOP-UP ENGINE
 // ==========================================
 app.get('/api/wallet/:userId', async (req, res) => {
   try {
@@ -280,6 +313,7 @@ app.get('/api/wallet/:userId', async (req, res) => {
   }
 });
 
+// Direct Sandbox Wallet Funding
 app.post('/api/wallet/topup', async (req, res) => {
   try {
     const { userId, amount, description } = req.body;
@@ -298,7 +332,7 @@ app.post('/api/wallet/topup', async (req, res) => {
       transactionId: `TOP-${Date.now()}-${Math.floor(100 + Math.random() * 900)}`,
       type: 'credit',
       amount: topupAmount,
-      description: description || 'Driver Wallet Top-Up',
+      description: description || 'Cashless Wallet Top-Up',
       balanceAfter: newBalance,
       date: new Date(),
     };
@@ -320,7 +354,7 @@ app.post('/api/wallet/topup', async (req, res) => {
 });
 
 // ==========================================
-// 6. PAYSTACK DVA WEBHOOK HANDLER
+// 6. PAYSTACK DVA WEBHOOK (INSTANT DEPOSITS)
 // ==========================================
 app.post('/api/webhooks/paystack', async (req, res) => {
   const paystackSecret = process.env.PAYSTACK_SECRET_KEY;
@@ -348,32 +382,32 @@ app.post('/api/webhooks/paystack', async (req, res) => {
       if (!customerPhone) return;
       const last10Digits = customerPhone.replace(/[^0-9]/g, '').slice(-10);
 
-      const driver = await User.findOne({
-        role: 'driver',
+      // Support auto-crediting for both passengers and drivers
+      const targetUser = await User.findOne({
         phone: { $regex: new RegExp(last10Digits + '$') },
       });
 
-      if (!driver) return;
+      if (!targetUser) return;
 
-      const alreadyCredited = driver.transactions?.some((tx) => tx.transactionId === reference);
+      const alreadyCredited = targetUser.transactions?.some((tx) => tx.transactionId === reference);
       if (alreadyCredited) return;
 
-      const newBalance = (driver.walletBalance || 0) + transferAmountNaira;
+      const newBalance = (targetUser.walletBalance || 0) + transferAmountNaira;
       const isNowActive = newBalance >= -2500;
 
-      driver.transactions.push({
+      targetUser.transactions.push({
         transactionId: reference,
         type: 'credit',
         amount: transferAmountNaira,
-        description: `Direct Bank Transfer (DVA) • ${data.authorization?.bank || 'Bank Deposit'}`,
+        description: `Cashless DVA Deposit • ${data.authorization?.bank || 'Bank Transfer'}`,
         balanceAfter: newBalance,
         date: new Date(data.paid_at || Date.now()),
       });
 
-      driver.walletBalance = newBalance;
-      driver.isSuspendedFromRadar = !isNowActive;
-      await driver.save();
-      console.log(`✅ [PAYSTACK] Credited Captain ${driver.name} with ₦${transferAmountNaira}`);
+      targetUser.walletBalance = newBalance;
+      targetUser.isSuspendedFromRadar = !isNowActive;
+      await targetUser.save();
+      console.log(`✅ [PAYSTACK DVA] Credited ${targetUser.name} with ₦${transferAmountNaira}`);
     }
   } catch (err) {
     console.error('Webhook error:', err);
@@ -381,13 +415,21 @@ app.post('/api/webhooks/paystack', async (req, res) => {
 });
 
 // ==========================================
-// 7. RIDES & DISPATCH ENGINE
+// 7. RIDES & CASHLESS DISPATCH
 // ==========================================
 app.post('/api/rides/request', async (req, res) => {
   try {
     const payload = req.body;
     const generatedRideId = `HH-${Math.floor(100000 + Math.random() * 900000)}`;
-    const newRide = new Ride({ ...payload, rideId: payload.rideId || generatedRideId, status: 'pending' });
+
+    const newRide = new Ride({
+      ...payload,
+      rideId: payload.rideId || generatedRideId,
+      status: 'pending',
+      paymentMethod: payload.paymentMethod || 'wallet',
+      paymentStatus: 'pending',
+    });
+
     await newRide.save();
     res.json({ success: true, ride: newRide });
   } catch (error) {
@@ -456,6 +498,7 @@ app.post('/api/rides/start', async (req, res) => {
   }
 });
 
+// 100% Cashless Trip Settle: 85% Driver / 15% Platform Split
 app.post('/api/rides/complete', async (req, res) => {
   try {
     const { rideId, deliveryPin } = req.body;
@@ -468,60 +511,140 @@ app.post('/api/rides/complete', async (req, res) => {
       }
     }
 
-    const finalFare = Number(ride.totalFare || ride.fare || 3000);
-    const driverEarnings = Math.round(finalFare * 0.85);
-    const platformFee = Math.round(finalFare * 0.15);
+    const finalFare = Number(ride.totalFare || ride.fare || 2500);
+    const driverEarnings = Math.round(finalFare * 0.85); // 85% to driver
+    const platformFee = Math.round(finalFare * 0.15);    // 15% to HappyHour
+
+    const driver = await User.findById(ride.driverId);
+    const passenger = await User.findById(ride.passengerId);
+
+    // Track 1: Wallet-to-Wallet Instant Transfer
+    if (ride.paymentMethod === 'wallet') {
+      if (!passenger || passenger.walletBalance < finalFare) {
+        return res.status(400).json({
+          success: false,
+          message: 'Passenger wallet balance insufficient. Please top up or pay via direct bank transfer.',
+        });
+      }
+
+      // 1. Debit Passenger 100%
+      passenger.walletBalance -= finalFare;
+      passenger.transactions.push({
+        transactionId: `PAY-${Date.now()}-${Math.floor(100 + Math.random() * 900)}`,
+        type: 'debit',
+        amount: finalFare,
+        description: `Payment for Trip ${ride.rideId} (100% Cashless)`,
+        balanceAfter: passenger.walletBalance,
+        date: new Date(),
+      });
+      await passenger.save();
+
+      // 2. Credit Driver 85%
+      if (driver) {
+        driver.walletBalance = (driver.walletBalance || 0) + driverEarnings;
+        driver.transactions.push({
+          transactionId: `EARN-${Date.now()}-${Math.floor(100 + Math.random() * 900)}`,
+          type: 'credit',
+          amount: driverEarnings,
+          description: `85% Earnings for Trip ${ride.rideId} (₦${platformFee} Platform Fee)`,
+          balanceAfter: driver.walletBalance,
+          date: new Date(),
+        });
+        await driver.save();
+      }
+
+      ride.paymentStatus = 'settled';
+    }
 
     ride.status = 'completed';
     ride.driverEarnings = driverEarnings;
     ride.platformFee = platformFee;
     await ride.save();
 
-    let updatedBalance = null;
-    let isSuspended = false;
-
-    if (ride.driverId) {
-      const driver = await User.findById(ride.driverId);
-      if (driver) {
-        updatedBalance = (driver.walletBalance || 0) - platformFee;
-        isSuspended = updatedBalance < -2500;
-
-        driver.transactions.push({
-          transactionId: `COMM-${Date.now()}-${Math.floor(100 + Math.random() * 900)}`,
-          type: 'debit',
-          amount: platformFee,
-          description: `15% Commission for Trip ${ride.rideId}`,
-          balanceAfter: updatedBalance,
-          date: new Date(),
-        });
-
-        driver.walletBalance = updatedBalance;
-        driver.isSuspendedFromRadar = isSuspended;
-        await driver.save();
-      }
-    }
-
     res.json({
       success: true,
       ride,
-      wallet: { currentBalance: updatedBalance, isSuspendedFromRadar: isSuspended },
       receipt: {
         totalFare: finalFare,
         driverEarnings,
         platformFee,
-        paymentMethod: 'Cash',
+        paymentMethod: ride.paymentMethod || 'wallet',
       },
+      driverWallet: driver ? driver.walletBalance : null,
+      passengerWallet: passenger ? passenger.walletBalance : null,
     });
   } catch (error) {
+    console.error('Complete Ride Error:', error);
     res.status(500).json({ success: false, message: error.message });
   }
 });
 
 // ==========================================
-// 8. PAYSTACK MULTI-CHANNEL TRANSACTION ENGINE
+// 8. DIRECT BANK TRANSFER WITH AUTO 85/15 SPLIT
 // ==========================================
 
-// Initialize Card, USSD, or Bank App Checkout
+// Direct Bank Transfer for Specific Ride (Auto-Split to Driver Bank)
+app.post('/api/payment/initialize-trip', async (req, res) => {
+  try {
+    const { rideId, passengerId, driverId } = req.body;
+    const ride = await Ride.findOne({ rideId });
+    const driver = await User.findById(driverId);
+    const passenger = await User.findById(passengerId);
+
+    if (!ride || !driver) {
+      return res.status(404).json({ success: false, message: 'Invalid ride or driver details' });
+    }
+
+    const fare = Number(ride.totalFare || ride.fare);
+    const reference = `HH_TRIP_${Date.now()}_${Math.floor(1000 + Math.random() * 9000)}`;
+
+    const payload = {
+      email: passenger?.email || `${passenger?.phone.replace(/[^0-9]/g, '')}@happyhourlogistics.ng`,
+      amount: fare * 100, // Kobo
+      reference,
+      currency: 'NGN',
+      channels: ['bank_transfer', 'ussd', 'card'],
+      metadata: {
+        rideId: ride.rideId,
+        passengerId: passenger?._id,
+        driverId: driver._id,
+        driverEarnings: Math.round(fare * 0.85),
+        platformFee: Math.round(fare * 0.15),
+      },
+    };
+
+    // If Captain has a Paystack Subaccount, attach it to route 85% to their bank account
+    if (driver.driverDetails?.paystackSubaccountCode) {
+      payload.subaccount = driver.driverDetails.paystackSubaccountCode;
+      payload.transaction_charge = Math.round(fare * 0.15) * 100; // Platform retains 15%
+      payload.bearer = 'subaccount';
+    }
+
+    const paystackRes = await fetch('https://api.paystack.co/transaction/initialize', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(payload),
+    });
+
+    const data = await paystackRes.json();
+    if (data.status && data.data) {
+      res.json({
+        success: true,
+        authorizationUrl: data.data.authorization_url,
+        reference,
+      });
+    } else {
+      res.status(400).json({ success: false, message: data.message || 'Payment initiation failed' });
+    }
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// Standard Wallet Top-Up Checkout (For funding in-app wallet)
 app.post('/api/payment/initialize', async (req, res) => {
   try {
     const { userId, amount, email, channelType } = req.body;
@@ -532,29 +655,24 @@ app.post('/api/payment/initialize', async (req, res) => {
     }
 
     const user = await User.findById(userId);
-    if (!user) {
-      return res.status(404).json({ success: false, message: 'User account not found.' });
-    }
+    if (!user) return res.status(404).json({ success: false, message: 'User not found.' });
 
     const reference = `HH_PAY_${Date.now()}_${Math.floor(1000 + Math.random() * 9000)}`;
     const userEmail = email || user.email || `${user.phone.replace(/[^0-9]/g, '')}@happyhourlogistics.ng`;
 
-    const channels = channelType
-      ? [channelType]
-      : ['card', 'bank', 'ussd', 'bank_transfer'];
+    const channels = channelType ? [channelType] : ['card', 'bank', 'ussd', 'bank_transfer'];
 
     const paystackPayload = JSON.stringify({
       email: userEmail,
-      amount: topupAmount * 100, // Paystack requires amounts in Kobo
+      amount: topupAmount * 100,
       reference,
       currency: 'NGN',
       channels,
-      callback_url: 'https://happyhourlogistics-backend.onrender.com/api/payment/callback',
       metadata: {
         userId: user._id.toString(),
         userName: user.name,
         userRole: user.role,
-        purpose: user.role === 'driver' ? 'driver_commission_topup' : 'passenger_wallet_credit',
+        purpose: 'wallet_topup',
       },
     });
 
@@ -573,74 +691,12 @@ app.post('/api/payment/initialize', async (req, res) => {
       res.json({
         success: true,
         authorizationUrl: data.data.authorization_url,
-        accessCode: data.data.access_code,
         reference,
       });
     } else {
       res.status(400).json({ success: false, message: data.message || 'Unable to initialize checkout.' });
     }
   } catch (error) {
-    console.error('Paystack Initialize Error:', error);
-    res.status(500).json({ success: false, message: error.message });
-  }
-});
-
-// Client Payment Verification (Instant Check Fallback)
-app.get('/api/payment/verify/:reference', async (req, res) => {
-  try {
-    const { reference } = req.params;
-
-    const response = await fetch(`https://api.paystack.co/transaction/verify/${encodeURIComponent(reference)}`, {
-      method: 'GET',
-      headers: {
-        Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`,
-      },
-    });
-
-    const data = await response.json();
-
-    if (data.status && data.data.status === 'success') {
-      const verifiedAmount = data.data.amount / 100;
-      const userId = data.data.metadata?.userId;
-
-      if (userId) {
-        const user = await User.findById(userId);
-        if (user) {
-          const alreadyCredited = user.transactions?.some((tx) => tx.transactionId === reference);
-
-          if (!alreadyCredited) {
-            const newBalance = (user.walletBalance || 0) + verifiedAmount;
-            const isNowActive = newBalance >= -2500;
-
-            user.walletBalance = newBalance;
-            user.isSuspendedFromRadar = !isNowActive;
-            user.transactions.push({
-              transactionId: reference,
-              type: 'credit',
-              amount: verifiedAmount,
-              description: `Paystack Checkout (${data.data.channel?.toUpperCase() || 'ONLINE'})`,
-              balanceAfter: newBalance,
-              date: new Date(),
-            });
-
-            await user.save();
-          }
-
-          return res.json({
-            success: true,
-            verified: true,
-            walletBalance: user.walletBalance,
-            isSuspendedFromRadar: user.isSuspendedFromRadar,
-          });
-        }
-      }
-
-      return res.json({ success: true, verified: true, data: data.data });
-    } else {
-      return res.json({ success: false, verified: false, message: 'Transaction unverified or pending.' });
-    }
-  } catch (error) {
-    console.error('Paystack Verification Error:', error);
     res.status(500).json({ success: false, message: error.message });
   }
 });
@@ -650,7 +706,7 @@ app.get('/api/payment/verify/:reference', async (req, res) => {
 // ==========================================
 app.use((err, req, res, next) => {
   if (err.type === 'entity.too.large') {
-    return res.status(413).json({ success: false, message: 'Photo payload exceeds limit.' });
+    return res.status(413).json({ success: false, message: 'Payload exceeds upload limit.' });
   }
   console.error('Server Error:', err);
   res.status(500).json({ success: false, message: 'Internal Server Error' });
