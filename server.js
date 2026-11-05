@@ -2,11 +2,12 @@ const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
 const crypto = require('crypto');
+const path = require('path');
 
 const app = express();
 
 // ==========================================
-// 1. RAW BODY PARSER FOR PAYSTACK WEBHOOK
+// 1. RAW BODY PARSER & MIDDLEWARE
 // ==========================================
 app.use(cors({ origin: '*' }));
 
@@ -14,7 +15,7 @@ app.use(
   express.json({
     limit: '50mb',
     verify: (req, res, buf) => {
-      req.rawBody = buf; // Preserves raw buffer for HMAC-SHA512 verification
+      req.rawBody = buf; // Preserves raw buffer for Paystack HMAC verification
     },
   })
 );
@@ -39,7 +40,7 @@ mongoose
   .catch((err) => console.error('❌ MongoDB Connection Error:', err));
 
 // ==========================================
-// 3. SCHEMAS & MODELS (100% CASHLESS + SUBACCOUNTS)
+// 3. SCHEMAS & MODELS
 // ==========================================
 const TransactionSchema = new mongoose.Schema({
   transactionId: { type: String, required: true },
@@ -61,8 +62,7 @@ const UserSchema = new mongoose.Schema(
     gender: { type: String, default: 'Male' },
     accountTier: { type: String, default: 'Tier 1' },
 
-    // In-App Cashless Wallet (Both Passenger & Driver)
-    walletBalance: { type: Number, default: 1000 }, // ₦1,000 Starter Credit
+    walletBalance: { type: Number, default: 1000 },
     isSuspendedFromRadar: { type: Boolean, default: false },
     transactions: [TransactionSchema],
 
@@ -75,13 +75,11 @@ const UserSchema = new mongoose.Schema(
       vehicleModel: String,
       plateNumber: String,
       serviceScope: { type: String, default: 'both' },
-
-      // Driver Bank Settlement Fields for Paystack 85% Auto-Split
       bankName: String,
       bankCode: String,
       accountNumber: String,
       accountName: String,
-      paystackSubaccountCode: String, // e.g. SUB_xxxxxxxxxx
+      paystackSubaccountCode: String,
     },
   },
   { timestamps: true }
@@ -108,8 +106,8 @@ const RideSchema = new mongoose.Schema(
     driverName: String,
     status: { type: String, default: 'pending' },
     deliveryPin: String,
-    paymentMethod: { type: String, default: 'wallet' }, // 'wallet' | 'bank_transfer'
-    paymentStatus: { type: String, default: 'pending' }, // 'pending' | 'settled'
+    paymentMethod: { type: String, default: 'wallet' },
+    paymentStatus: { type: String, default: 'pending' },
     recipient: { name: String, phone: String },
     packageDetails: {
       description: String,
@@ -122,8 +120,8 @@ const RideSchema = new mongoose.Schema(
     cargoRecipientName: String,
     cargoRecipientPhone: String,
     pickupPhotoUrl: String,
-    driverEarnings: Number, // 85% Cut
-    platformFee: Number,    // 15% Cut
+    driverEarnings: Number,
+    platformFee: Number,
   },
   { timestamps: true, strict: false }
 );
@@ -132,9 +130,11 @@ const User = mongoose.model('User', UserSchema);
 const Ride = mongoose.model('Ride', RideSchema);
 
 // ==========================================
-// 4. AUTH & PROFILE MANAGEMENT
+// 4. API ROUTES
 // ==========================================
-app.get('/', (req, res) => {
+
+// Dedicated Backend Health Check
+app.get('/api/health', (req, res) => {
   res.json({ status: 'online', service: 'HappyHour Logistics Cashless API', timestamp: new Date().toISOString() });
 });
 
@@ -206,7 +206,6 @@ app.post('/api/drivers/register', async (req, res) => {
     const fullName = `${firstName} ${surname}`.trim();
     let subaccountCode = null;
 
-    // Create Paystack Subaccount for 85% Auto-Split
     if (bankCode && accountNumber && process.env.PAYSTACK_SECRET_KEY) {
       try {
         const subRes = await fetch('https://api.paystack.co/subaccount', {
@@ -219,7 +218,7 @@ app.post('/api/drivers/register', async (req, res) => {
             business_name: `${fullName} (HappyHour Captain)`,
             settlement_bank: bankCode,
             account_number: accountNumber.trim(),
-            percentage_charge: 15, // Platform retains 15%, Driver gets 85%
+            percentage_charge: 15,
             description: `Automated 85% payout subaccount for Captain ${fullName}`,
           }),
         });
@@ -294,9 +293,7 @@ app.put('/api/users/profile/:userId', async (req, res) => {
   }
 });
 
-// ==========================================
-// 5. WALLET & TOP-UP ENGINE
-// ==========================================
+// Wallet Balance & History
 app.get('/api/wallet/:userId', async (req, res) => {
   try {
     const user = await User.findById(req.params.userId);
@@ -313,7 +310,7 @@ app.get('/api/wallet/:userId', async (req, res) => {
   }
 });
 
-// Direct Sandbox Wallet Funding
+// Sandbox Wallet Top-Up
 app.post('/api/wallet/topup', async (req, res) => {
   try {
     const { userId, amount, description } = req.body;
@@ -353,9 +350,7 @@ app.post('/api/wallet/topup', async (req, res) => {
   }
 });
 
-// ==========================================
-// 6. PAYSTACK DVA WEBHOOK (INSTANT DEPOSITS)
-// ==========================================
+// Paystack DVA Webhook Handler
 app.post('/api/webhooks/paystack', async (req, res) => {
   const paystackSecret = process.env.PAYSTACK_SECRET_KEY;
   const signature = req.headers['x-paystack-signature'];
@@ -382,7 +377,6 @@ app.post('/api/webhooks/paystack', async (req, res) => {
       if (!customerPhone) return;
       const last10Digits = customerPhone.replace(/[^0-9]/g, '').slice(-10);
 
-      // Support auto-crediting for both passengers and drivers
       const targetUser = await User.findOne({
         phone: { $regex: new RegExp(last10Digits + '$') },
       });
@@ -414,9 +408,7 @@ app.post('/api/webhooks/paystack', async (req, res) => {
   }
 });
 
-// ==========================================
-// 7. RIDES & CASHLESS DISPATCH
-// ==========================================
+// Rides Engine
 app.post('/api/rides/request', async (req, res) => {
   try {
     const payload = req.body;
@@ -498,7 +490,7 @@ app.post('/api/rides/start', async (req, res) => {
   }
 });
 
-// 100% Cashless Trip Settle: 85% Driver / 15% Platform Split
+// Conclude Trip: 85% Driver / 15% Platform Fee
 app.post('/api/rides/complete', async (req, res) => {
   try {
     const { rideId, deliveryPin } = req.body;
@@ -512,13 +504,12 @@ app.post('/api/rides/complete', async (req, res) => {
     }
 
     const finalFare = Number(ride.totalFare || ride.fare || 2500);
-    const driverEarnings = Math.round(finalFare * 0.85); // 85% to driver
-    const platformFee = Math.round(finalFare * 0.15);    // 15% to HappyHour
+    const driverEarnings = Math.round(finalFare * 0.85);
+    const platformFee = Math.round(finalFare * 0.15);
 
     const driver = await User.findById(ride.driverId);
     const passenger = await User.findById(ride.passengerId);
 
-    // Track 1: Wallet-to-Wallet Instant Transfer
     if (ride.paymentMethod === 'wallet') {
       if (!passenger || passenger.walletBalance < finalFare) {
         return res.status(400).json({
@@ -527,7 +518,6 @@ app.post('/api/rides/complete', async (req, res) => {
         });
       }
 
-      // 1. Debit Passenger 100%
       passenger.walletBalance -= finalFare;
       passenger.transactions.push({
         transactionId: `PAY-${Date.now()}-${Math.floor(100 + Math.random() * 900)}`,
@@ -539,7 +529,6 @@ app.post('/api/rides/complete', async (req, res) => {
       });
       await passenger.save();
 
-      // 2. Credit Driver 85%
       if (driver) {
         driver.walletBalance = (driver.walletBalance || 0) + driverEarnings;
         driver.transactions.push({
@@ -579,11 +568,7 @@ app.post('/api/rides/complete', async (req, res) => {
   }
 });
 
-// ==========================================
-// 8. DIRECT BANK TRANSFER WITH AUTO 85/15 SPLIT
-// ==========================================
-
-// Direct Bank Transfer for Specific Ride (Auto-Split to Driver Bank)
+// Paystack Direct Bank Transfer (Auto 85/15 Payout)
 app.post('/api/payment/initialize-trip', async (req, res) => {
   try {
     const { rideId, passengerId, driverId } = req.body;
@@ -600,7 +585,7 @@ app.post('/api/payment/initialize-trip', async (req, res) => {
 
     const payload = {
       email: passenger?.email || `${passenger?.phone.replace(/[^0-9]/g, '')}@happyhourlogistics.ng`,
-      amount: fare * 100, // Kobo
+      amount: fare * 100,
       reference,
       currency: 'NGN',
       channels: ['bank_transfer', 'ussd', 'card'],
@@ -613,10 +598,9 @@ app.post('/api/payment/initialize-trip', async (req, res) => {
       },
     };
 
-    // If Captain has a Paystack Subaccount, attach it to route 85% to their bank account
     if (driver.driverDetails?.paystackSubaccountCode) {
       payload.subaccount = driver.driverDetails.paystackSubaccountCode;
-      payload.transaction_charge = Math.round(fare * 0.15) * 100; // Platform retains 15%
+      payload.transaction_charge = Math.round(fare * 0.15) * 100;
       payload.bearer = 'subaccount';
     }
 
@@ -644,7 +628,7 @@ app.post('/api/payment/initialize-trip', async (req, res) => {
   }
 });
 
-// Standard Wallet Top-Up Checkout (For funding in-app wallet)
+// Standard Wallet Top-Up Checkout
 app.post('/api/payment/initialize', async (req, res) => {
   try {
     const { userId, amount, email, channelType } = req.body;
@@ -702,7 +686,18 @@ app.post('/api/payment/initialize', async (req, res) => {
 });
 
 // ==========================================
-// 9. ERROR GUARD & SERVER LISTENER
+// 5. STATIC WEB BUNDLE SERVING (EXPO WEB SPA)
+// ==========================================
+// Serve all compiled files from the Expo dist folder
+app.use(express.static(path.join(__dirname, 'dist')));
+
+// SPA Fallback: Any route not handled by the /api routes serves index.html
+app.get('*', (req, res) => {
+  res.sendFile(path.join(__dirname, 'dist', 'index.html'));
+});
+
+// ==========================================
+// 6. ERROR GUARD & SERVER LISTENER
 // ==========================================
 app.use((err, req, res, next) => {
   if (err.type === 'entity.too.large') {
@@ -714,5 +709,5 @@ app.use((err, req, res, next) => {
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
-  console.log(`🚀 HappyHour Logistics Server running on port ${PORT}`);
+  console.log(`🚀 HappyHour Logistics Server & Web App running on port ${PORT}`);
 });
