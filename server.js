@@ -691,8 +691,8 @@ app.post('/api/payment/initialize', async (req, res) => {
 // Serve all compiled files from the Expo dist folder
 app.use(express.static(path.join(__dirname, 'dist')));
 
-// SPA Fallback: Any route not handled by the /api routes serves index.html
-app.get('*', (req, res) => {
+// SPA Fallback: Express 5 safe catch-all
+app.use((req, res) => {
   res.sendFile(path.join(__dirname, 'dist', 'index.html'));
 });
 
