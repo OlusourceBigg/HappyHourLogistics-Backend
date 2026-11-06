@@ -139,6 +139,47 @@ app.get('/api/health', (req, res) => {
   res.json({ status: 'online', service: 'HappyHour Logistics API', timestamp: new Date().toISOString() });
 });
 
+// Admin Dashboard Overview
+app.get('/api/admin/overview', async (req, res) => {
+  try {
+    const totalUsers = await User.countDocuments();
+    const totalDrivers = await User.countDocuments({ role: 'driver' });
+    const totalPassengers = await User.countDocuments({ role: 'passenger' });
+    const totalRides = await Ride.countDocuments();
+    const completedRides = await Ride.find({ status: 'completed' });
+
+    const totalRevenue = completedRides.reduce(
+      (sum, r) => sum + Number(r.totalFare || r.fare || 0),
+      0
+    );
+    const totalPlatformFees = completedRides.reduce(
+      (sum, r) => sum + Number(r.platformFee || 0),
+      0
+    );
+    const totalDriverPayouts = completedRides.reduce(
+      (sum, r) => sum + Number(r.driverEarnings || 0),
+      0
+    );
+
+    res.json({
+      success: true,
+      metrics: {
+        totalUsers,
+        totalDrivers,
+        totalPassengers,
+        totalRides,
+        completedRidesCount: completedRides.length,
+        totalGrossVolume: totalRevenue,
+        platformCommission15: totalPlatformFees,
+        driverPayouts85: totalDriverPayouts,
+      },
+    });
+  } catch (error) {
+    console.error('Admin Overview Error:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
 // Role-Isolated Auth
 app.post('/api/users/auth', async (req, res) => {
   try {
@@ -180,7 +221,7 @@ app.post('/api/users/auth', async (req, res) => {
   }
 });
 
-// Driver KYC
+// Driver KYC with Automated Subaccount Creation
 app.post('/api/drivers/register', async (req, res) => {
   try {
     const {
@@ -269,7 +310,7 @@ app.post('/api/drivers/register', async (req, res) => {
   }
 });
 
-// Profile Update
+// Update Profile
 app.put('/api/users/profile/:userId', async (req, res) => {
   try {
     const { avatarUrl, email, gender, name } = req.body;
@@ -305,7 +346,7 @@ app.get('/api/wallet/:userId', async (req, res) => {
   }
 });
 
-// Sandbox Top-up
+// Sandbox Top-Up
 app.post('/api/wallet/topup', async (req, res) => {
   try {
     const { userId, amount, description } = req.body;
@@ -343,7 +384,7 @@ app.post('/api/wallet/topup', async (req, res) => {
   }
 });
 
-// Paystack Webhook
+// Paystack DVA Webhook
 app.post('/api/webhooks/paystack', async (req, res) => {
   const paystackSecret = process.env.PAYSTACK_SECRET_KEY;
   const signature = req.headers['x-paystack-signature'];
@@ -398,7 +439,7 @@ app.post('/api/webhooks/paystack', async (req, res) => {
   }
 });
 
-// Ride Requests
+// Trip Requests & Dispatch
 app.post('/api/rides/request', async (req, res) => {
   try {
     const payload = req.body;
@@ -585,7 +626,7 @@ app.post('/api/rides/complete', async (req, res) => {
   }
 });
 
-// Initialize Direct Bank Transfer
+// Paystack Direct Bank Transfer
 app.post('/api/payment/initialize-trip', async (req, res) => {
   try {
     const { rideId, passengerId, driverId } = req.body;
@@ -639,6 +680,7 @@ app.post('/api/payment/initialize-trip', async (req, res) => {
   }
 });
 
+// Standard Wallet Top-Up Checkout
 app.post('/api/payment/initialize', async (req, res) => {
   try {
     const { userId, amount, email, channelType } = req.body;
@@ -682,14 +724,14 @@ app.post('/api/payment/initialize', async (req, res) => {
 });
 
 // ==========================================
-// 5. API 404 GUARD (PREVENTS ACCIDENTAL HTML FALLTHROUGH)
+// 5. API 404 GUARD (PREVENTS FALLTHROUGH TO STATIC HTML)
 // ==========================================
 app.all('/api/*', (req, res) => {
   res.status(404).json({ success: false, message: `Endpoint ${req.method} ${req.path} not found.` });
 });
 
 // ==========================================
-// 6. STATIC WEB SERVING (ONLY IF DIST EXISTS)
+// 6. SAFE STATIC SPA SERVING (EXISTS CHECK)
 // ==========================================
 const distPath = path.join(__dirname, 'dist');
 app.use(express.static(distPath));
