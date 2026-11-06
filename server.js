@@ -1,4 +1,8 @@
-require('dotenv').config();
+try {
+  require('dotenv').config();
+} catch (e) {
+  console.log('dotenv not installed, using system environment variables.');
+}
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
