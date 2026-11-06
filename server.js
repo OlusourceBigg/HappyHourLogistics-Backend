@@ -1,9 +1,10 @@
-require('dotenv').config(); // Load environment variables from .env file
+require('dotenv').config();
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
 const crypto = require('crypto');
 const path = require('path');
+const fs = require('fs');
 
 const app = express();
 
@@ -105,7 +106,7 @@ const RideSchema = new mongoose.Schema(
     coordinates: Object,
     driverId: String,
     driverName: String,
-    status: { type: String, default: 'pending' },
+    status: { type: String, default: 'pending' }, // 'pending' | 'accepted' | 'in_progress' | 'awaiting_payment' | 'completed'
     deliveryPin: String,
     paymentMethod: { type: String, default: 'wallet' },
     paymentStatus: { type: String, default: 'pending' },
@@ -134,22 +135,18 @@ const Ride = mongoose.model('Ride', RideSchema);
 // 4. API ROUTES
 // ==========================================
 
-// Dedicated Backend Health Check
 app.get('/api/health', (req, res) => {
-  res.json({ status: 'online', service: 'HappyHour Logistics Cashless API', timestamp: new Date().toISOString() });
+  res.json({ status: 'online', service: 'HappyHour Logistics API', timestamp: new Date().toISOString() });
 });
 
 // Role-Isolated Auth
 app.post('/api/users/auth', async (req, res) => {
   try {
     const { name, phone, email, role, primaryHub, isSignUp } = req.body;
-    if (!phone) {
-      return res.status(400).json({ success: false, message: 'Phone number is required.' });
-    }
+    if (!phone) return res.status(400).json({ success: false, message: 'Phone number is required.' });
 
     const cleanPhone = phone.trim();
     const targetRole = role || 'passenger';
-
     let user = await User.findOne({ phone: cleanPhone, role: targetRole });
 
     if (!user) {
@@ -179,12 +176,11 @@ app.post('/api/users/auth', async (req, res) => {
 
     res.json({ success: true, user });
   } catch (error) {
-    console.error('Auth Error:', error);
     res.status(500).json({ success: false, message: error.message });
   }
 });
 
-// Driver KYC with Automated Paystack Subaccount Creation
+// Driver KYC
 app.post('/api/drivers/register', async (req, res) => {
   try {
     const {
@@ -269,17 +265,15 @@ app.post('/api/drivers/register', async (req, res) => {
     await driver.save();
     res.json({ success: true, driver });
   } catch (error) {
-    console.error('KYC Registration Error:', error);
     res.status(500).json({ success: false, message: error.message });
   }
 });
 
-// Update Profile
+// Profile Update
 app.put('/api/users/profile/:userId', async (req, res) => {
   try {
     const { avatarUrl, email, gender, name } = req.body;
     const user = await User.findById(req.params.userId);
-
     if (!user) return res.status(404).json({ success: false, message: 'User not found.' });
 
     if (avatarUrl !== undefined) user.avatarUrl = avatarUrl;
@@ -311,14 +305,12 @@ app.get('/api/wallet/:userId', async (req, res) => {
   }
 });
 
-// Sandbox Wallet Top-Up
+// Sandbox Top-up
 app.post('/api/wallet/topup', async (req, res) => {
   try {
     const { userId, amount, description } = req.body;
     const topupAmount = Number(amount);
-    if (!topupAmount || topupAmount <= 0) {
-      return res.status(400).json({ success: false, message: 'Invalid amount.' });
-    }
+    if (!topupAmount || topupAmount <= 0) return res.status(400).json({ success: false, message: 'Invalid amount.' });
 
     const user = await User.findById(userId);
     if (!user) return res.status(404).json({ success: false, message: 'User not found.' });
@@ -351,7 +343,7 @@ app.post('/api/wallet/topup', async (req, res) => {
   }
 });
 
-// Paystack DVA Webhook Handler
+// Paystack Webhook
 app.post('/api/webhooks/paystack', async (req, res) => {
   const paystackSecret = process.env.PAYSTACK_SECRET_KEY;
   const signature = req.headers['x-paystack-signature'];
@@ -361,9 +353,7 @@ app.post('/api/webhooks/paystack', async (req, res) => {
   }
 
   const hash = crypto.createHmac('sha512', paystackSecret).update(req.rawBody).digest('hex');
-  if (hash !== signature) {
-    return res.status(401).send('Invalid signature');
-  }
+  if (hash !== signature) return res.status(401).send('Invalid signature');
 
   res.status(200).send('Webhook acknowledged');
 
@@ -402,14 +392,13 @@ app.post('/api/webhooks/paystack', async (req, res) => {
       targetUser.walletBalance = newBalance;
       targetUser.isSuspendedFromRadar = !isNowActive;
       await targetUser.save();
-      console.log(`✅ [PAYSTACK DVA] Credited ${targetUser.name} with ₦${transferAmountNaira}`);
     }
   } catch (err) {
     console.error('Webhook error:', err);
   }
 });
 
-// Rides Engine
+// Ride Requests
 app.post('/api/rides/request', async (req, res) => {
   try {
     const payload = req.body;
@@ -491,31 +480,57 @@ app.post('/api/rides/start', async (req, res) => {
   }
 });
 
-// Conclude Trip: 85% Driver / 15% Platform Fee
+// DRIVER ARRIVAL -> PROMPTS PASSENGER FOR PAYMENT
+app.post('/api/rides/request-payment', async (req, res) => {
+  try {
+    const { rideId, driverId } = req.body;
+    const ride = await Ride.findOne({ rideId });
+    if (!ride) return res.status(404).json({ success: false, message: 'Ride not found' });
+
+    if (driverId && ride.driverId && ride.driverId.toString() !== driverId.toString()) {
+      return res.status(403).json({ success: false, message: 'Unauthorized driver action' });
+    }
+
+    ride.status = 'awaiting_payment';
+    await ride.save();
+
+    console.log(`🛎️ [PAYMENT REQUESTED] Captain reached destination for Ride: ${ride.rideId}`);
+    res.json({ success: true, ride });
+  } catch (error) {
+    console.error('Request Payment Error:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// PASSENGER AUTHORIZES & SETTLES PAYMENT
 app.post('/api/rides/complete', async (req, res) => {
   try {
-    const { rideId, deliveryPin } = req.body;
+    const { rideId, passengerId, deliveryPin, paymentMethod } = req.body;
     const ride = await Ride.findOne({ rideId });
     if (!ride) return res.status(404).json({ success: false, message: 'Ride not found' });
 
     if (ride.serviceType === 'logistics' && ride.deliveryPin) {
       if (!deliveryPin || deliveryPin.trim() !== ride.deliveryPin.trim()) {
-        return res.status(400).json({ success: false, message: 'Invalid 4-digit Delivery PIN.' });
+        return res.status(400).json({
+          success: false,
+          message: 'Invalid 4-digit Delivery PIN. Please confirm the code with the recipient.',
+        });
       }
     }
 
+    const chosenPaymentMethod = paymentMethod || ride.paymentMethod || 'wallet';
     const finalFare = Number(ride.totalFare || ride.fare || 2500);
     const driverEarnings = Math.round(finalFare * 0.85);
     const platformFee = Math.round(finalFare * 0.15);
 
     const driver = await User.findById(ride.driverId);
-    const passenger = await User.findById(ride.passengerId);
+    const passenger = await User.findById(ride.passengerId || passengerId);
 
-    if (ride.paymentMethod === 'wallet') {
+    if (chosenPaymentMethod === 'wallet') {
       if (!passenger || passenger.walletBalance < finalFare) {
         return res.status(400).json({
           success: false,
-          message: 'Passenger wallet balance insufficient. Please top up or pay via direct bank transfer.',
+          message: `Insufficient wallet balance (₦${passenger ? passenger.walletBalance.toLocaleString() : 0}). Top up or pay via direct bank transfer.`,
         });
       }
 
@@ -547,6 +562,7 @@ app.post('/api/rides/complete', async (req, res) => {
     }
 
     ride.status = 'completed';
+    ride.paymentMethod = chosenPaymentMethod;
     ride.driverEarnings = driverEarnings;
     ride.platformFee = platformFee;
     await ride.save();
@@ -558,7 +574,7 @@ app.post('/api/rides/complete', async (req, res) => {
         totalFare: finalFare,
         driverEarnings,
         platformFee,
-        paymentMethod: ride.paymentMethod || 'wallet',
+        paymentMethod: chosenPaymentMethod,
       },
       driverWallet: driver ? driver.walletBalance : null,
       passengerWallet: passenger ? passenger.walletBalance : null,
@@ -569,7 +585,7 @@ app.post('/api/rides/complete', async (req, res) => {
   }
 });
 
-// Paystack Direct Bank Transfer (Auto 85/15 Payout)
+// Initialize Direct Bank Transfer
 app.post('/api/payment/initialize-trip', async (req, res) => {
   try {
     const { rideId, passengerId, driverId } = req.body;
@@ -577,9 +593,7 @@ app.post('/api/payment/initialize-trip', async (req, res) => {
     const driver = await User.findById(driverId);
     const passenger = await User.findById(passengerId);
 
-    if (!ride || !driver) {
-      return res.status(404).json({ success: false, message: 'Invalid ride or driver details' });
-    }
+    if (!ride || !driver) return res.status(404).json({ success: false, message: 'Invalid ride or driver details' });
 
     const fare = Number(ride.totalFare || ride.fare);
     const reference = `HH_TRIP_${Date.now()}_${Math.floor(1000 + Math.random() * 9000)}`;
@@ -616,11 +630,7 @@ app.post('/api/payment/initialize-trip', async (req, res) => {
 
     const data = await paystackRes.json();
     if (data.status && data.data) {
-      res.json({
-        success: true,
-        authorizationUrl: data.data.authorization_url,
-        reference,
-      });
+      res.json({ success: true, authorizationUrl: data.data.authorization_url, reference });
     } else {
       res.status(400).json({ success: false, message: data.message || 'Payment initiation failed' });
     }
@@ -629,12 +639,10 @@ app.post('/api/payment/initialize-trip', async (req, res) => {
   }
 });
 
-// Standard Wallet Top-Up Checkout
 app.post('/api/payment/initialize', async (req, res) => {
   try {
     const { userId, amount, email, channelType } = req.body;
     const topupAmount = Number(amount);
-
     if (!topupAmount || topupAmount < 100) {
       return res.status(400).json({ success: false, message: 'Minimum transaction amount is ₦100.' });
     }
@@ -644,22 +652,7 @@ app.post('/api/payment/initialize', async (req, res) => {
 
     const reference = `HH_PAY_${Date.now()}_${Math.floor(1000 + Math.random() * 9000)}`;
     const userEmail = email || user.email || `${user.phone.replace(/[^0-9]/g, '')}@happyhourlogistics.ng`;
-
     const channels = channelType ? [channelType] : ['card', 'bank', 'ussd', 'bank_transfer'];
-
-    const paystackPayload = JSON.stringify({
-      email: userEmail,
-      amount: topupAmount * 100,
-      reference,
-      currency: 'NGN',
-      channels,
-      metadata: {
-        userId: user._id.toString(),
-        userName: user.name,
-        userRole: user.role,
-        purpose: 'wallet_topup',
-      },
-    });
 
     const response = await fetch('https://api.paystack.co/transaction/initialize', {
       method: 'POST',
@@ -667,17 +660,19 @@ app.post('/api/payment/initialize', async (req, res) => {
         Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`,
         'Content-Type': 'application/json',
       },
-      body: paystackPayload,
+      body: JSON.stringify({
+        email: userEmail,
+        amount: topupAmount * 100,
+        reference,
+        currency: 'NGN',
+        channels,
+        metadata: { userId: user._id.toString(), userName: user.name, userRole: user.role, purpose: 'wallet_topup' },
+      }),
     });
 
     const data = await response.json();
-
     if (data.status && data.data) {
-      res.json({
-        success: true,
-        authorizationUrl: data.data.authorization_url,
-        reference,
-      });
+      res.json({ success: true, authorizationUrl: data.data.authorization_url, reference });
     } else {
       res.status(400).json({ success: false, message: data.message || 'Unable to initialize checkout.' });
     }
@@ -687,18 +682,29 @@ app.post('/api/payment/initialize', async (req, res) => {
 });
 
 // ==========================================
-// 5. STATIC WEB BUNDLE SERVING (EXPO WEB SPA)
+// 5. API 404 GUARD (PREVENTS ACCIDENTAL HTML FALLTHROUGH)
 // ==========================================
-// Serve all compiled files from the Expo dist folder
-app.use(express.static(path.join(__dirname, 'dist')));
-
-// SPA Fallback: Express 5 safe catch-all
-app.use((req, res) => {
-  res.sendFile(path.join(__dirname, 'dist', 'index.html'));
+app.all('/api/*', (req, res) => {
+  res.status(404).json({ success: false, message: `Endpoint ${req.method} ${req.path} not found.` });
 });
 
 // ==========================================
-// 6. ERROR GUARD & SERVER LISTENER
+// 6. STATIC WEB SERVING (ONLY IF DIST EXISTS)
+// ==========================================
+const distPath = path.join(__dirname, 'dist');
+app.use(express.static(distPath));
+
+app.use((req, res) => {
+  const indexPath = path.join(distPath, 'index.html');
+  if (fs.existsSync(indexPath)) {
+    res.sendFile(indexPath);
+  } else {
+    res.status(404).json({ success: false, message: 'Static web app not built yet.' });
+  }
+});
+
+// ==========================================
+// 7. GLOBAL ERROR HANDLER & LISTENER
 // ==========================================
 app.use((err, req, res, next) => {
   if (err.type === 'entity.too.large') {
@@ -710,5 +716,5 @@ app.use((err, req, res, next) => {
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
-  console.log(`🚀 HappyHour Logistics Server & Web App running on port ${PORT}`);
+  console.log(`🚀 HappyHour Logistics Server running on port ${PORT}`);
 });
