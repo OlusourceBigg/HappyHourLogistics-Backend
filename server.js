@@ -1,8 +1,9 @@
 try {
   require('dotenv').config();
 } catch (e) {
-  console.log('dotenv not installed, using system environment variables.');
+  console.log('Running with system environment variables.');
 }
+
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
@@ -730,8 +731,11 @@ app.post('/api/payment/initialize', async (req, res) => {
 // ==========================================
 // 5. API 404 GUARD (PREVENTS FALLTHROUGH TO STATIC HTML)
 // ==========================================
-app.all('/api/*', (req, res) => {
-  res.status(404).json({ success: false, message: `Endpoint ${req.method} ${req.path} not found.` });
+app.use('/api', (req, res) => {
+  res.status(404).json({
+    success: false,
+    message: `Endpoint ${req.method} ${req.originalUrl} not found.`,
+  });
 });
 
 // ==========================================
