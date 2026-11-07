@@ -143,7 +143,6 @@ const RideSchema = new mongoose.Schema(
       latitude: Number,
       longitude: Number,
     },
-    // Real-Time GPS Streaming Data (from Captain phone)
     driverCoordinates: {
       latitude: { type: Number, default: null },
       longitude: { type: Number, default: null },
@@ -667,7 +666,6 @@ app.post('/api/rides/start', async (req, res) => {
 
 /**
  * Driver Streamer: Real-Time Location Ingestion
- * Invoked by Captain's Location.watchPositionAsync loop every 5s/8m
  */
 app.post('/api/rides/update-location', async (req, res) => {
   try {
@@ -843,7 +841,8 @@ app.post('/api/rides/complete', async (req, res) => {
 const distPath = path.join(__dirname, 'dist');
 app.use(express.static(distPath));
 
-app.get('*', (req, res) => {
+// Catch-all handler (compatible with Express 4 and Express 5 / modern path-to-regexp)
+app.use((req, res) => {
   if (req.path.startsWith('/api/')) {
     return res.status(404).json({ success: false, message: 'API route not found' });
   }
