@@ -4,7 +4,6 @@ const mongoose = require('mongoose');
 const cors = require('cors');
 const path = require('path');
 const crypto = require('crypto');
-const User = require('./models/User');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -14,7 +13,7 @@ const OVERDRAFT_LIMIT = -2500;
 // MIDDLEWARES & BODY PARSER
 // ==========================================
 app.use(cors());
-// Set limits to 50mb to accommodate base64 package & avatar photo payloads
+// 50mb limit to accommodate base64 photos and signatures
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
@@ -81,13 +80,12 @@ const UserSchema = new mongoose.Schema(
     },
     walletBalance: {
       type: Number,
-      default: 1000, // ₦1,000 welcome credit for new signups
+      default: 1000,
     },
     isSuspendedFromRadar: {
       type: Boolean,
       default: false,
     },
-    // Driver-specific attributes (populated during Captain KYC)
     driverDetails: {
       firstName: String,
       surname: String,
@@ -145,7 +143,13 @@ const RideSchema = new mongoose.Schema(
       latitude: Number,
       longitude: Number,
     },
-    // Logistics & Cargo Handover Security
+    // Real-Time GPS Streaming Data (from Captain phone)
+    driverCoordinates: {
+      latitude: { type: Number, default: null },
+      longitude: { type: Number, default: null },
+      heading: { type: Number, default: 0 },
+      updatedAt: { type: Date, default: null },
+    },
     deliveryPin: { type: String, default: null },
     recipient: {
       name: String,
@@ -174,7 +178,6 @@ const RideSchema = new mongoose.Schema(
 const User = mongoose.models.User || mongoose.model('User', UserSchema);
 const Ride = mongoose.models.Ride || mongoose.model('Ride', RideSchema);
 
-// Synchronize database indexes on boot
 mongoose.connection.on('open', async () => {
   try {
     await User.syncIndexes();
@@ -189,10 +192,6 @@ mongoose.connection.on('open', async () => {
 // AUTHENTICATION & KYC ROUTES
 // ==========================================
 
-/**
- * Passenger / Captain User Authentication & Registration
- * Mandatory 11-digit NIN verification enforced on new signups.
- */
 app.post('/api/users/auth', async (req, res) => {
   try {
     const { name, phone, nin, role, primaryHub, isSignUp } = req.body;
@@ -218,7 +217,6 @@ app.post('/api/users/auth', async (req, res) => {
         });
       }
 
-      // Check if NIN is already linked to another account
       const existingNinUser = await User.findOne({ nin: cleanNin });
       if (existingNinUser && existingNinUser.phone !== cleanPhone) {
         return res.status(400).json({
@@ -254,7 +252,6 @@ app.post('/api/users/auth', async (req, res) => {
       return res.json({ success: true, user });
     }
 
-    // Sign-in flow
     if (!user) {
       return res.status(404).json({
         success: false,
@@ -262,7 +259,6 @@ app.post('/api/users/auth', async (req, res) => {
       });
     }
 
-    // Enforce role consistency if attempting to log in as driver without KYC
     if (targetRole === 'driver' && user.role !== 'driver' && !user.driverDetails?.plateNumber) {
       return res.status(403).json({
         success: false,
@@ -283,10 +279,6 @@ app.post('/api/users/auth', async (req, res) => {
   }
 });
 
-/**
- * Captain KYC Registration
- * Links vehicle class, settlement NUBAN bank, and 11-digit NIN.
- */
 app.post('/api/drivers/register', async (req, res) => {
   try {
     const {
@@ -322,7 +314,6 @@ app.post('/api/drivers/register', async (req, res) => {
       });
     }
 
-    // Prevent duplicate NIN cross-registration
     const ninConflict = await User.findOne({ nin: cleanNin });
     if (ninConflict && ninConflict.phone !== cleanPhone) {
       return res.status(400).json({
@@ -368,9 +359,6 @@ app.post('/api/drivers/register', async (req, res) => {
   }
 });
 
-/**
- * Profile Photo & Metadata Updates
- */
 app.put('/api/users/profile/:userId', async (req, res) => {
   try {
     const { userId } = req.params;
@@ -396,9 +384,6 @@ app.put('/api/users/profile/:userId', async (req, res) => {
 // CASHLESS WALLET & PAYMENT ROUTES
 // ==========================================
 
-/**
- * Retrieve User Wallet Balance & Ledger
- */
 app.get('/api/wallet/:userId', async (req, res) => {
   try {
     const user = await User.findById(req.params.userId);
@@ -423,9 +408,6 @@ app.get('/api/wallet/:userId', async (req, res) => {
   }
 });
 
-/**
- * Top Up Wallet (Instant Sandbox / In-App Simulation)
- */
 app.post('/api/wallet/topup', async (req, res) => {
   try {
     const { userId, amount, description } = req.body;
@@ -461,9 +443,6 @@ app.post('/api/wallet/topup', async (req, res) => {
   }
 });
 
-/**
- * Initialize Card / USSD Payment Checkout (Paystack Direct / Simulation)
- */
 app.post('/api/payment/initialize', async (req, res) => {
   try {
     const { userId, amount, email } = req.body;
@@ -473,7 +452,6 @@ app.post('/api/payment/initialize', async (req, res) => {
       return res.status(400).json({ success: false, message: 'Minimum checkout is ₦100.' });
     }
 
-    // If a Paystack Secret Key is configured in environment, initiate real checkout; otherwise return simulation URL
     if (process.env.PAYSTACK_SECRET_KEY) {
       const response = await fetch('https://api.paystack.co/transaction/initialize', {
         method: 'POST',
@@ -483,7 +461,7 @@ app.post('/api/payment/initialize', async (req, res) => {
         },
         body: JSON.stringify({
           email: email || 'payments@happyhourlogistics.ng',
-          amount: numericAmount * 100, // Paystack operates in Kobo
+          amount: numericAmount * 100,
           metadata: { userId },
         }),
       });
@@ -498,7 +476,6 @@ app.post('/api/payment/initialize', async (req, res) => {
       }
     }
 
-    // Dynamic Checkout Fallback URL for Instant Testing
     const mockRef = `HH-${Date.now()}`;
     const authorizationUrl = `https://checkout.paystack.com/simulate/${mockRef}?amount=${numericAmount}`;
 
@@ -512,9 +489,6 @@ app.post('/api/payment/initialize', async (req, res) => {
   }
 });
 
-/**
- * Direct Paystack Split Checkout for Trip Settlement
- */
 app.post('/api/payment/initialize-trip', async (req, res) => {
   try {
     const { rideId, passengerId, driverId } = req.body;
@@ -539,12 +513,9 @@ app.post('/api/payment/initialize-trip', async (req, res) => {
 });
 
 // ==========================================
-// RIDE DISPATCH & LOGISTICS CARGO ROUTES
+// RIDE DISPATCH & REAL-TIME GPS STREAMING
 // ==========================================
 
-/**
- * Request an Intra-City Ride or Freight Cargo Dispatch
- */
 app.post('/api/rides/request', async (req, res) => {
   try {
     const {
@@ -593,6 +564,7 @@ app.post('/api/rides/request', async (req, res) => {
       vehicleType: vehicleType || 'Cab / Micra',
       paymentMethod: paymentMethod || 'wallet',
       coordinates: coordinates || null,
+      driverCoordinates: null,
       deliveryPin: deliveryPin || (serviceType === 'logistics' ? Math.floor(1000 + Math.random() * 9000).toString() : null),
       recipient: recipient || (cargoRecipientName ? { name: cargoRecipientName, phone: cargoRecipientPhone } : undefined),
       packageDetails: packageDetails || {
@@ -617,9 +589,6 @@ app.post('/api/rides/request', async (req, res) => {
   }
 });
 
-/**
- * Driver Radar: Available Trips Filtered by Vehicle Class
- */
 app.get('/api/rides/available', async (req, res) => {
   try {
     const { vehicleType, driverId } = req.query;
@@ -644,9 +613,6 @@ app.get('/api/rides/available', async (req, res) => {
   }
 });
 
-/**
- * Driver Action: Accept Cashless Trip
- */
 app.post('/api/rides/accept', async (req, res) => {
   try {
     const { rideId, driverId } = req.body;
@@ -680,9 +646,6 @@ app.post('/api/rides/accept', async (req, res) => {
   }
 });
 
-/**
- * Driver Action: Start Trip
- */
 app.post('/api/rides/start', async (req, res) => {
   try {
     const { rideId } = req.body;
@@ -703,8 +666,58 @@ app.post('/api/rides/start', async (req, res) => {
 });
 
 /**
- * Driver Action: Arrived at Destination -> Request Payment from Passenger
+ * Driver Streamer: Real-Time Location Ingestion
+ * Invoked by Captain's Location.watchPositionAsync loop every 5s/8m
  */
+app.post('/api/rides/update-location', async (req, res) => {
+  try {
+    const { rideId, driverId, coordinates } = req.body;
+
+    if (
+      !rideId ||
+      !coordinates ||
+      typeof coordinates.latitude !== 'number' ||
+      typeof coordinates.longitude !== 'number'
+    ) {
+      return res.status(400).json({ success: false, message: 'Invalid coordinates payload.' });
+    }
+
+    const ride = await Ride.findOneAndUpdate(
+      {
+        rideId,
+        driverId,
+        status: { $in: ['accepted', 'in_progress'] },
+      },
+      {
+        $set: {
+          driverCoordinates: {
+            latitude: coordinates.latitude,
+            longitude: coordinates.longitude,
+            heading: coordinates.heading || 0,
+            updatedAt: new Date(),
+          },
+        },
+      },
+      { new: true }
+    );
+
+    if (!ride) {
+      return res.status(404).json({
+        success: false,
+        message: 'No active trip matches this driver session.',
+      });
+    }
+
+    return res.json({
+      success: true,
+      driverCoordinates: ride.driverCoordinates,
+    });
+  } catch (error) {
+    console.error('Driver GPS ingestion error:', error);
+    return res.status(500).json({ success: false, message: 'Failed to update coordinates.' });
+  }
+});
+
 app.post('/api/rides/request-payment', async (req, res) => {
   try {
     const { rideId, driverId } = req.body;
@@ -725,9 +738,6 @@ app.post('/api/rides/request-payment', async (req, res) => {
   }
 });
 
-/**
- * Real-Time Polling: Check Individual Trip Status
- */
 app.get('/api/rides/:rideId', async (req, res) => {
   try {
     const ride = await Ride.findOne({ rideId: req.params.rideId });
@@ -741,9 +751,6 @@ app.get('/api/rides/:rideId', async (req, res) => {
   }
 });
 
-/**
- * Passenger Action: Authorize Cashless Payment, Verify PIN, and Settle 85/15 Split
- */
 app.post('/api/rides/complete', async (req, res) => {
   try {
     const { rideId, passengerId, deliveryPin, paymentMethod } = req.body;
@@ -753,7 +760,6 @@ app.post('/api/rides/complete', async (req, res) => {
       return res.status(404).json({ success: false, message: 'Trip record not found.' });
     }
 
-    // Verify 4-digit security PIN for logistics parcels
     if (ride.serviceType === 'logistics' && ride.deliveryPin) {
       if (!deliveryPin || String(deliveryPin).trim() !== String(ride.deliveryPin).trim()) {
         return res.status(400).json({
@@ -769,7 +775,6 @@ app.post('/api/rides/complete', async (req, res) => {
 
     let updatedPassengerWallet = null;
 
-    // Settle in-app cashless wallet deduction
     if (paymentMethod === 'wallet') {
       const passenger = await User.findById(passengerId);
       if (!passenger) {
@@ -793,7 +798,6 @@ app.post('/api/rides/complete', async (req, res) => {
       updatedPassengerWallet = passenger.walletBalance;
     }
 
-    // Credit Captain earnings ledger
     if (ride.driverId) {
       const driver = await User.findById(ride.driverId);
       if (driver) {
@@ -808,7 +812,6 @@ app.post('/api/rides/complete', async (req, res) => {
       }
     }
 
-    // Update ride record
     ride.status = 'completed';
     ride.driverEarnings = driverEarnings;
     ride.platformFee = platformFee;
@@ -837,7 +840,6 @@ app.post('/api/rides/complete', async (req, res) => {
 // ==========================================
 // WEB BUILD PRODUCTION DEPLOYMENT
 // ==========================================
-// Serves static web frontend if exported into the dist/ directory
 const distPath = path.join(__dirname, 'dist');
 app.use(express.static(distPath));
 
