@@ -4,6 +4,7 @@ const mongoose = require('mongoose');
 const cors = require('cors');
 const path = require('path');
 const crypto = require('crypto');
+const User = require('./models/User');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
